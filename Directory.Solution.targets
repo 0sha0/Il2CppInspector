@@ -1,0 +1,48 @@
+<Project>
+  <!-- Solution builds also build the Rust GUI front end with the matching cargo profile, and solution clean removes its
+       cargo target directory. Without a working cargo both are skipped with a warning so the C# projects still build. -->
+  <Target Name="DetectCargo">
+    <Exec
+      Command="cargo --version"
+      EchoOff="true"
+      IgnoreExitCode="true"
+      IgnoreStandardErrorWarningFormat="true"
+      StandardOutputImportance="low"
+      StandardErrorImportance="low"
+    >
+      <Output TaskParameter="ExitCode" PropertyName="_CargoExitCode" />
+    </Exec>
+    <Warning
+      Condition="'$(_CargoExitCode)' != '0'"
+      Text="cargo was not found or cannot run; skipping Il2CppInspector.GUI. Install Rust from https://rustup.rs to build the GUI."
+    />
+  </Target>
+
+  <!-- quiet keeps compiler diagnostics but drops cargo's progress lines; cargo warnings stay messages, failures fail the build. -->
+  <Target Name="BuildGui" AfterTargets="Build;Rebuild" DependsOnTargets="DetectCargo">
+    <PropertyGroup>
+      <_CargoProfile Condition="'$(Configuration)' == 'Release'">--release</_CargoProfile>
+    </PropertyGroup>
+    <Exec
+      Condition="'$(_CargoExitCode)' == '0'"
+      Command="cargo build --quiet $(_CargoProfile)"
+      WorkingDirectory="$(MSBuildThisFileDirectory)Il2CppInspector.GUI"
+      IgnoreStandardErrorWarningFormat="true"
+      StandardErrorImportance="high"
+    />
+  </Target>
+
+  <Target
+    Name="CleanGui"
+    AfterTargets="Clean"
+    DependsOnTargets="DetectCargo"
+    Condition="Exists('$(MSBuildThisFileDirectory)Il2CppInspector.GUI/target')"
+  >
+    <Exec
+      Condition="'$(_CargoExitCode)' == '0'"
+      Command="cargo clean"
+      WorkingDirectory="$(MSBuildThisFileDirectory)Il2CppInspector.GUI"
+      IgnoreStandardErrorWarningFormat="true"
+    />
+  </Target>
+</Project>
