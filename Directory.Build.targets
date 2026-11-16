@@ -1,0 +1,18 @@
+<Project>
+  <!-- Clean only deletes the files recorded for the active configuration. Remove bin/ and every obj/<Configuration>/ instead,
+       keeping the NuGet restore files directly under obj/ so IDEs and Rebuild still find project.assets.json. -->
+  <Target Name="CleanAllConfigurations" AfterTargets="Clean">
+    <PropertyGroup>
+      <_CleanOutputPath>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(BaseOutputPath)'))</_CleanOutputPath>
+      <_CleanIntermediatePath>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)'))</_CleanIntermediatePath>
+    </PropertyGroup>
+    <ItemGroup>
+      <_CleanDirectory Include="$(_CleanOutputPath)" />
+      <_CleanDirectory
+        Include="$([System.IO.Directory]::GetDirectories('$(_CleanIntermediatePath)'))"
+        Condition="Exists('$(_CleanIntermediatePath)')"
+      />
+    </ItemGroup>
+    <RemoveDir Directories="@(_CleanDirectory)" />
+  </Target>
+</Project>
