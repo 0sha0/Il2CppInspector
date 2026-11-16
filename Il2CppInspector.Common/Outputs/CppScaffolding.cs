@@ -25,16 +25,27 @@ namespace Il2CppInspector.Outputs
             model.UnityVersion.CompareTo("2017.2.1") >= 0 && model.Package.BinaryImage.Bits == 64 && useBetterArraySize;
 
         private StreamWriter _writer;
+        private PhasedProgress _progress;
+
+        public Action<OperationProgress> ProgressCallback { get; set; }
 
         // Write the type header
         // This can be used by other output modules
         public void WriteTypes(string typeHeaderFile)
         {
+            // Weights are microseconds, measured on stock, Endfield and ZZZ samples: the runtime header as a whole,
+            // then each application declaration.
+            _progress = new PhasedProgress("Generating C++ types", ProgressCallback);
+            _progress.Plan("Runtime types", 10_000);
+            _model.PlanAnalysis(_progress, types: true, order: true);
+            _progress.Plan("Application types", 3.5 * _model.CountDeclarations());
+
             using var fs = new FileStream(typeHeaderFile, FileMode.Create);
             _writer = new StreamWriter(fs, Encoding.ASCII);
 
             using (_writer)
             {
+                _progress.Begin("Runtime types");
                 writeHeader();
 
                 // Write primitive type definitions for when we're not including other headers
@@ -127,6 +138,9 @@ namespace Il2CppInspector.Outputs
                 writeCode("#endif");
                 writeLine("");
 
+                // Plugin models build their declarations on first use; doing it here reports that work.
+                _model.Analyze(_progress, types: true, order: true);
+                _progress.Begin("Application types", _model.RequiredForwardDefinitions.Count + _model.DependencyOrderedCppTypes.Count);
                 writeForwardDefinitions();
 
                 if (_model.GameNativeModel is NativeTypeModel)
@@ -155,6 +169,7 @@ namespace Il2CppInspector.Outputs
                 writeCode("}");
                 writeCode("#endif");
             }
+            _progress.End();
         }
 
         public void Write(string projectPath) => WriteProject(projectPath, null);
@@ -407,7 +422,10 @@ namespace Il2CppInspector.Outputs
         {
             writeSectionHeader("Required forward definitions");
             foreach (var cppType in _model.RequiredForwardDefinitions)
+            {
                 writeCode(cppType.ToString());
+                _progress.Step();
+            }
         }
 
         private void writeTypesForGroup(string header, string group)
@@ -421,6 +439,7 @@ namespace Il2CppInspector.Outputs
 
         private void writeType(CppType cppType)
         {
+            _progress.Step();
             if (cppType is CppEnumType)
             {
                 // Ghidra can't process C++ enum base types

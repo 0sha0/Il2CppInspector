@@ -6,7 +6,12 @@ namespace Il2CppInspector.Cpp;
 public class CppTypeDependencyGraph
 {
     // Order already-normalized native declarations, including references to scalar enums.
-    internal static (List<CppType> Ordered, List<CppType> Forwards) OrderDeclarations(CppTypeCollection types, HashSet<CppType> declarations)
+    // step runs once per top-level type of each pass; types added by a pass are ordered by another pass.
+    internal static (List<CppType> Ordered, List<CppType> Forwards) OrderDeclarations(
+        CppTypeCollection types,
+        HashSet<CppType> declarations,
+        Action? step = null
+    )
     {
         var ordered = new List<CppType>();
         var forwards = new List<CppType>();
@@ -18,7 +23,10 @@ public class CppTypeDependencyGraph
         {
             count = types.Types.Count;
             foreach (var type in types.Types.Values.ToArray())
+            {
                 Visit(type);
+                step?.Invoke();
+            }
         } while (count != types.Types.Count);
         return (ordered, forwards);
 

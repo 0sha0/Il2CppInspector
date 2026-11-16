@@ -16,7 +16,34 @@ namespace Il2CppInspector.Model
         private readonly HashSet<CppType> nativeTypes = [];
         private string group = "unused_concrete_types";
 
-        public void BuildMethods()
+        // Exporters plan and run the parts they need inside their own progress (AppModel.PlanAnalysis). Weights are
+        // microseconds per item measured on MORAX samples; a declaration estimate is one per type source.
+        internal void Plan(PhasedProgress progress, bool types, bool order)
+        {
+            if (!methodsBuilt)
+                progress.Plan("Native methods", 4.0 * model.CountMethodSources());
+            if ((types || order) && !typesBuilt)
+                progress.Plan("Native types", 1.6 * TypeSourceCount());
+            if (order && !orderBuilt)
+                progress.Plan("Declaration order", 3.0 * TypeSourceCount());
+        }
+
+        // Exact once the declarations are ordered.
+        internal long DeclarationEstimate() =>
+            orderBuilt ? model.AnalysisForwardDefinitions.Count + model.AnalysisOrderedTypes.Count : TypeSourceCount();
+
+        internal void Build(PhasedProgress progress, bool types, bool order)
+        {
+            BuildMethods(progress);
+            if (types || order)
+                RegisterTypes(progress);
+            if (order)
+                BuildOrderedTypes(progress);
+        }
+
+        public void BuildMethods() => BuildMethods(null);
+
+        private void BuildMethods(PhasedProgress progress)
         {
             if (methodsBuilt)
             {
@@ -25,7 +52,8 @@ namespace Il2CppInspector.Model
 
             // Reuse signature types while building methods without retaining another model-wide index.
             var signatureTypes = new Dictionary<TypeInfo, (CppType Type, bool Complete)>();
-            model.BuildMethodsFromMetadata(AddMethod);
+            progress?.Begin("Native methods", model.CountMethodSources());
+            model.BuildMethodsFromMetadata(AddMethod, progress);
             methodsBuilt = true;
 
             AppMethod AddMethod(MethodBase method, string methodGroup)
@@ -58,19 +86,19 @@ namespace Il2CppInspector.Model
 
         public void BuildTypes()
         {
-            BuildMethods();
-            RegisterTypes();
+            BuildMethods(null);
+            RegisterTypes(null);
         }
 
         public IEnumerable<CppType> EnumerateNativeTypes()
         {
-            RegisterTypes();
+            RegisterTypes(null);
             return Cpp.Types.Values.ToArray();
         }
 
         public IEnumerable<NativeMethod> EnumerateNativeMethods()
         {
-            BuildMethods();
+            BuildMethods(null);
             return model
                 .AnalysisMethods.Values.Where(m => m.HasCompiledCode)
                 .Select(m => new NativeMethod(m.CppFnPtrType.Name, m.MethodCodeAddress, m.CppFnPtrType, m.SignatureComplete)
@@ -80,13 +108,23 @@ namespace Il2CppInspector.Model
                 });
         }
 
-        private void RegisterTypes()
+        // Type definitions, references, recorded generic and array instances, constructed method classes and type usages.
+        private long TypeSourceCount() =>
+            (long)Reflection.TypesByDefinitionIndex.Length
+            + Reflection.TypesByReferenceIndex.Length
+            + Native.GenericTypes.Count
+            + Native.ArrayTypes.Count
+            + Package.MethodSpecs.Length
+            + Package.MetadataUsages.Count;
+
+        private void RegisterTypes(PhasedProgress progress)
         {
             if (typesBuilt)
             {
                 return;
             }
 
+            progress?.Begin("Native types", TypeSourceCount());
             group = "unused_concrete_types";
             foreach (
                 var type in Reflection
@@ -96,16 +134,19 @@ namespace Il2CppInspector.Model
                     .Distinct()
             )
             {
+                progress?.Step();
                 AddType(type);
             }
             // Method contexts may contain constructed classes not present in the type-reference table.
             foreach (var spec in Package.MethodSpecs.Where(s => s.ClassIndexIndex >= 0).Distinct())
             {
+                progress?.Step();
                 var definition = Reflection.MethodsByDefinitionIndex[spec.MethodDefinitionIndex].DeclaringType;
                 AddType(definition.MakeGenericType(Reflection.ResolveGenericArguments(Package.GenericInstances[spec.ClassIndexIndex])));
             }
             foreach (var usage in Package.MetadataUsages.Where(u => u.Type is MetadataUsageType.TypeInfo or MetadataUsageType.Type))
             {
+                progress?.Step();
                 var type = Reflection.GetMetadataUsageType(usage);
                 var entry = model.AnalysisTypes[type];
                 if (entry.Group == "unused_concrete_types")
@@ -167,17 +208,21 @@ namespace Il2CppInspector.Model
             }
         }
 
-        public void BuildOrderedTypes()
+        public void BuildOrderedTypes() => BuildOrderedTypes(null);
+
+        private void BuildOrderedTypes(PhasedProgress progress)
         {
             if (orderBuilt)
             {
                 return;
             }
 
-            BuildTypes();
+            BuildMethods(progress);
+            RegisterTypes(progress);
+            progress?.Begin("Declaration order", Cpp.Types.Count);
             model.AnalysisOrderedTypes.Clear();
             model.AnalysisForwardDefinitions.Clear();
-            var (ordered, forwards) = CppTypeDependencyGraph.OrderDeclarations(Cpp, nativeTypes);
+            var (ordered, forwards) = CppTypeDependencyGraph.OrderDeclarations(Cpp, nativeTypes, progress is null ? null : progress.Step);
             model.AnalysisOrderedTypes.AddRange(ordered);
             model.AnalysisForwardDefinitions.AddRange(forwards);
             orderBuilt = true;

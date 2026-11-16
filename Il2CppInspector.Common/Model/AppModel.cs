@@ -143,6 +143,13 @@ namespace Il2CppInspector.Model
             }
         }
 
+        // The number of methods EnumerateNativeSupportMethods yields, without building their signatures.
+        internal int CountNativeSupportMethods() =>
+            TypeModel.AttributesByIndices.Values.Count(m => m.VirtualAddress.Start != 0)
+            + Package.MethodInvokePointers.Count(p => p != 0)
+            + AvailableAPIs.Count
+            + (Package.Binary.RegistrationFunctionPointer != 0 ? 1 : 0);
+
         internal CppFnPtrType GetRegistrationSignature()
         {
             var declaration =
@@ -154,6 +161,20 @@ namespace Il2CppInspector.Model
         }
 
         public IEnumerable<CppType> EnumerateNativeTypes() => gameAnalysis?.EnumerateNativeTypes() ?? cppTypeCollection.Types.Values;
+
+        // Plugin analysis is built on first use. An exporter plans and runs the parts it uses inside its own progress, so the
+        // lazy build is reported there; stock models are fully built by Build and need nothing here.
+        internal void PlanAnalysis(PhasedProgress progress, bool types, bool order) =>
+            (gameAnalysis as NativeLayoutAnalysisModel)?.Plan(progress, types, order);
+
+        internal void Analyze(PhasedProgress progress, bool types, bool order) =>
+            (gameAnalysis as NativeLayoutAnalysisModel)?.Build(progress, types, order);
+
+        // Forward and ordered declarations of the header, estimated from the type sources until a plugin model orders them.
+        internal long CountDeclarations() =>
+            gameAnalysis is NativeLayoutAnalysisModel native
+                ? native.DeclarationEstimate()
+                : requiredForwardDefinitions.Count + dependencyOrderedCppTypes.Count;
 
         // All of the string literals in the IL2CPP binary
         // Note: Does not include string literals from global-metadata.dat
@@ -242,12 +263,37 @@ namespace Il2CppInspector.Model
         // The C++ compiler used to actually build the original IL2CPP binary will always be guessed based on the binary file format
         // (via the constructor of CppDeclarationGenerator, in InheritanceStyle)
         // If no target C++ compiler is specified, it will be set to match the one assumed to have been used to compile the binary
-        public AppModel Build(UnityVersion unityVersion = null, CppCompilerType compiler = CppCompilerType.BinaryFormat, bool silent = false)
+        public AppModel Build(
+            UnityVersion unityVersion = null,
+            CppCompilerType compiler = CppCompilerType.BinaryFormat,
+            bool silent = false,
+            Action<OperationProgress> progressCallback = null
+        )
         {
             // Don't re-build if not necessary
             var targetCompiler = compiler == CppCompilerType.BinaryFormat ? CppCompiler.GuessFromImage(Image) : compiler;
             if (UnityVersion == unityVersion && TargetCompiler == targetCompiler)
                 return this;
+
+            var usageCount = Package.MetadataUsages?.Count ?? 0;
+            var typeCount = TypeModel.TypesByDefinitionIndex.Length;
+            var methodSources = CountMethodSources();
+            // Weights are microseconds per item, or per phase without items, measured on stock, Endfield and ZZZ samples.
+            var progress = new PhasedProgress("Building application model", progressCallback);
+            progress.Plan("Unity headers", 150_000);
+            if (Package.Metadata.HasGameAdapter)
+            {
+                progress.Plan("Native layouts", 1_000);
+                progress.Plan("Native names", 13.0 * typeCount);
+            }
+            else
+            {
+                progress.Plan("Methods", 13.0 * methodSources);
+                progress.Plan("Data usages", 0.1 * usageCount);
+                progress.Plan("Types from usages", 1.0 * usageCount);
+                progress.Plan("Unused value types", 2.5 * typeCount);
+            }
+            progress.Begin("Unity headers");
 
             // Silent operation if requested
             var stdout = Console.Out;
@@ -311,13 +357,18 @@ namespace Il2CppInspector.Model
 
             if (Package.Metadata.HasGameAdapter)
             {
+                progress.Begin("Native layouts");
                 GameNativeModel = Package.Metadata.GamePlugin.CreateNativeModel(TypeModel);
+                // Methods, types and their order are built when an exporter first needs them (see PlanAnalysis).
+                progress.Begin("Native names");
                 gameAnalysis = Package.Metadata.GamePlugin.CreateAnalysisModel(this);
+                progress.End();
                 Console.SetOut(stdout);
                 return this;
             }
 
             // Both native-layout adapters and stock layouts use the same method/usage traversal.
+            progress.Begin("Methods", methodSources);
             BuildMethodsFromMetadata(
                 (method, methodGroup) =>
                 {
@@ -330,18 +381,22 @@ namespace Il2CppInspector.Model
                     var entry = new AppMethod(method, pointer) { Group = Group };
                     AnalysisMethods.Add(method, pointer, entry);
                     return entry;
-                }
+                },
+                progress
             );
 
-            BuildMetadataDataUsages();
+            progress.Begin("Data usages", usageCount);
+            BuildMetadataDataUsages(progress);
 
             // Add types from metadata usage list to C++ type model
             // Not supported in il2cpp <19
             Group = "types_from_usages";
 
+            progress.Begin("Types from usages", usageCount);
             if (Package.MetadataUsages != null)
                 foreach (var usage in Package.MetadataUsages)
                 {
+                    progress.Step();
                     var address = usage.VirtualAddress;
 
                     switch (usage.Type)
@@ -402,6 +457,7 @@ namespace Il2CppInspector.Model
             }
 
             // Find unused concrete value types
+            progress.Begin("Unused value types");
             var usedTypes = Types.Values.Select(t => t.Type);
             var unusedTypes = TypeModel.Types.Except(usedTypes);
             var unusedConcreteTypes = unusedTypes.Where(t =>
@@ -410,11 +466,13 @@ namespace Il2CppInspector.Model
 
             Group = "unused_concrete_types";
 
+            // No steps: the types are declared in one batch so the header keeps its declaration order.
             foreach (var type in unusedConcreteTypes)
                 declarationGenerator.IncludeType(type);
             AddTypes(declarationGenerator.GenerateRemainingTypeDeclarations());
 
             RequiredForwardDefinitions = declarationGenerator.GenerateRequiredForwardDefinitions();
+            progress.End();
 
             // Restore stdout
             Console.SetOut(stdout);
@@ -423,12 +481,22 @@ namespace Il2CppInspector.Model
             return this;
         }
 
-        internal void BuildMethodsFromMetadata(Func<MethodBase, string, AppMethod> add)
+        // Methods with code, constructed generic methods and method usages, as visited by BuildMethodsFromMetadata.
+        internal int CountMethodSources() =>
+            TypeModel.MethodsByDefinitionIndex.Count(m => m.VirtualAddress.HasValue)
+            + Package.MethodSpecs.Length
+            + (Package.MetadataUsages ?? []).Count(u => u.Type is MetadataUsageType.MethodDef or MetadataUsageType.MethodRef);
+
+        internal void BuildMethodsFromMetadata(Func<MethodBase, string, AppMethod> add, PhasedProgress progress = null)
         {
             foreach (var method in TypeModel.MethodsByDefinitionIndex.Where(m => m.VirtualAddress.HasValue))
+            {
+                progress?.Step();
                 add(method, "types_from_methods");
+            }
             for (var i = 0; i < Package.MethodSpecs.Length; i++)
             {
+                progress?.Step();
                 var spec = Package.MethodSpecs[i];
                 if (!Package.GenericMethodPointers.ContainsKey(spec))
                     continue;
@@ -437,15 +505,17 @@ namespace Il2CppInspector.Model
             foreach (var usage in Package.MetadataUsages ?? [])
                 if (usage.Type is MetadataUsageType.MethodDef or MetadataUsageType.MethodRef)
                 {
+                    progress?.Step();
                     var method = TypeModel.GetMetadataUsageMethod(usage);
                     add(method, "types_from_usages").MethodInfoPtrAddress = usage.VirtualAddress;
                 }
         }
 
-        internal void BuildMetadataDataUsages()
+        internal void BuildMetadataDataUsages(PhasedProgress progress = null)
         {
             foreach (var usage in Package.MetadataUsages ?? [])
             {
+                progress?.Step();
                 if (usage.Type == MetadataUsageType.StringLiteral)
                     Strings[usage.VirtualAddress] = TypeModel.GetMetadataUsageName(usage);
                 else if (usage.Type is MetadataUsageType.FieldInfo or MetadataUsageType.FieldRva)

@@ -33,9 +33,64 @@ namespace Il2CppInspector.Outputs
 
         public JSONMetadata(AppModel model) => this.model = model;
 
+        public Action<OperationProgress> ProgressCallback { get; set; }
+
+        private PhasedProgress progress;
+        private Dictionary<string, long> sectionSizes;
+
+        // Progress weight of one element per section, in microseconds measured on stock, Endfield and ZZZ samples;
+        // sections not listed cost about 1. Method invokers are counted per support method, which all need a signature.
+        private static readonly Dictionary<string, double> ElementCost = new()
+        {
+            ["methodDefinitions"] = 4.5,
+            ["constructedGenericMethods"] = 6,
+            ["methodInvokers"] = 30,
+            ["stringLiterals"] = 0.8,
+            ["typeInfoPointers"] = 4,
+            ["typeRefPointers"] = 3,
+            ["methodInfoPointers"] = 5,
+            ["functionAddresses"] = 0.1,
+            ["apis"] = 4,
+            ["exports"] = 0.5,
+            ["symbols"] = 0.5,
+            ["fields"] = 5,
+            ["fieldRvas"] = 5,
+        };
+
         // Write JSON metadata to file
         public void Write(string outputFile)
         {
+            // Sections that need plugin analysis count from the package, before the analysis runs.
+            var usages = model.Package.MetadataUsages ?? [];
+            sectionSizes = new()
+            {
+                ["methodDefinitions"] = model.TypeModel.MethodsByDefinitionIndex.Count(m => m.VirtualAddress.HasValue),
+                ["constructedGenericMethods"] = model.Package.GenericMethodPointers.Count,
+                ["customAttributesGenerators"] = model.TypeModel.AttributesByIndices.Count,
+                ["methodInvokers"] = model.CountNativeSupportMethods(),
+                ["stringLiterals"] = model.Strings.Count,
+                ["typeInfoPointers"] = usages.Count(u => u.Type == MetadataUsageType.TypeInfo),
+                ["typeRefPointers"] = usages.Count(u => u.Type == MetadataUsageType.Type),
+                ["methodInfoPointers"] = usages.Count(u => u.Type is MetadataUsageType.MethodDef or MetadataUsageType.MethodRef),
+                ["functionAddresses"] = model.Package.FunctionAddresses.Count,
+                ["apis"] = model.AvailableAPIs.Count,
+                ["exports"] = model.Exports.Count,
+                ["symbols"] = model.Symbols.Count,
+                ["fields"] = model.Fields.Count,
+                ["fieldRvas"] = model.FieldRvas.Count,
+            };
+            foreach (var section in (model.Package.Metadata.GameAdapter?.AdditionalUsages ?? []).GroupBy(u => u.Section))
+                sectionSizes[section.Key] = section.Count();
+            progress = new PhasedProgress("Generating JSON metadata", ProgressCallback);
+            // Only the method sections use the plugin analysis.
+            if (!SupplementDebugInfo)
+                model.PlanAnalysis(progress, types: false, order: false);
+            foreach (var (section, size) in sectionSizes)
+                if (!SupplementDebugInfo || !IsDebugSymbolSection(section))
+                    progress.Plan(section, size * ElementCost.GetValueOrDefault(section, 1));
+            if (!SupplementDebugInfo)
+                model.Analyze(progress, types: false, order: false);
+
             using var fs = new FileStream(outputFile, FileMode.Create);
             using var jsonWriter = new Utf8JsonWriter(fs, options: new JsonWriterOptions { Indented = true });
             writer = jsonWriter;
@@ -61,6 +116,7 @@ namespace Il2CppInspector.Outputs
             );
 
             writer.WriteEndObject();
+            progress.End();
         }
 
         private void writeMethods()
@@ -90,10 +146,13 @@ namespace Il2CppInspector.Outputs
                 "methodInvokers",
                 () =>
                 {
-                    foreach (
-                        var method in model.EnumerateNativeSupportMethods().Where(m => m.Name.StartsWith("Il2CppInvoker_", StringComparison.Ordinal))
-                    )
-                        writeObject(() => writeTypedFunctionName(method.Address, method.Signature.ToSignatureString(), method.Name));
+                    // Building every support signature is the cost; only unnamed invokers are written, so step per method.
+                    foreach (var method in model.EnumerateNativeSupportMethods())
+                    {
+                        progress.Step();
+                        if (method.Name.StartsWith("Il2CppInvoker_", StringComparison.Ordinal))
+                            writeObject(null, () => writeTypedFunctionName(method.Address, method.Signature.ToSignatureString(), method.Name));
+                    }
                 },
                 "Method.Invoke thunks"
             );
@@ -217,6 +276,7 @@ namespace Il2CppInspector.Outputs
                 {
                     foreach (var func in model.Package.FunctionAddresses)
                     {
+                        progress.Step();
                         writer.WriteStringValue(func.Key.ToAddressString());
                         FlushPending();
                     }
@@ -413,7 +473,12 @@ namespace Il2CppInspector.Outputs
                 writer.Flush();
         }
 
-        private void writeObject(Action objectWriter) => writeObject(null, objectWriter);
+        private void writeObject(Action objectWriter)
+        {
+            // Unnamed objects are array elements.
+            progress.Step();
+            writeObject(null, objectWriter);
+        }
 
         private void writeObject(string name, Action objectWriter, string description = null)
         {
@@ -434,7 +499,10 @@ namespace Il2CppInspector.Outputs
             if (AllowComments && description != null)
                 writer.WriteCommentValue(" " + description + " ");
             if (!SupplementDebugInfo || !IsDebugSymbolSection(name))
+            {
+                progress.Begin(name, sectionSizes.GetValueOrDefault(name));
                 arrayWriter();
+            }
             writer.WriteEndArray();
             FlushPending();
         }
