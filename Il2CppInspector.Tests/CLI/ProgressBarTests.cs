@@ -54,6 +54,64 @@ internal static class ProgressBarTests
             );
         }
 
+        output.GetStringBuilder().Clear();
+        ProgressBar.JsonLines = true;
+        try
+        {
+            Console.SetOut(output);
+            ProgressBar.Run(
+                "Generating DummyDlls",
+                report =>
+                {
+                    for (int i = 0; i < 100; i++)
+                        report(new OperationProgress("Generating DummyDlls", i, 100, "fixture"));
+                }
+            );
+            ProgressBar.WriteStatus("Processed 2000 relocations");
+        }
+        finally
+        {
+            Console.SetOut(original);
+            ProgressBar.JsonLines = false;
+        }
+        var events = output
+            .ToString()
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => JsonDocument.Parse(line).RootElement)
+            .ToArray();
+        Check(
+            events.Length < 10
+                && events[^2].GetProperty("event").GetString() == "progress"
+                && events[^2].GetProperty("current").GetInt64() == 100
+                && events[^2].GetProperty("total").GetInt64() == 100
+                && events[^2].GetProperty("detail").GetString() == "done"
+                && events[^1].GetProperty("event").GetString() == "status"
+                && events[^1].GetProperty("message").GetString() == "Processed 2000 relocations",
+            "JSON progress writes throttled objects, one per line, and completes before the next status"
+        );
+
+        // Phase weights and step counts are estimates; a phase must still end exactly at its planned share.
+        var phased = new List<OperationProgress>();
+        var plan = new PhasedProgress("Fixture", phased.Add);
+        plan.Plan("Short", 1);
+        plan.Plan("Long", 3);
+        plan.Begin("Short", 2);
+        for (int i = 0; i < 5; i++)
+            plan.Step();
+        var shortEnd = phased[^1].Current;
+        plan.Begin("Unplanned", 10);
+        plan.Step();
+        var unplanned = phased[^1].Current;
+        plan.Begin("Long", 1000);
+        for (int i = 0; i < 10; i++)
+            plan.Step();
+        plan.End();
+        Check(
+            shortEnd == 250 && unplanned == 250 && phased[^1] == new OperationProgress("Fixture", 1000, 1000, "Long"),
+            "Phased progress clamps extra steps to the phase share, gives unplanned phases no share and ends at the total"
+        );
+        Verify(phased, "Phased progress");
+
         if (args.Length == 1)
             return;
         var relocations = new List<OperationProgress>();
@@ -65,6 +123,15 @@ internal static class ProgressBarTests
         var assemblies = new List<OperationProgress>();
         new AssemblyShims(model) { ProgressCallback = assemblies.Add }.Write(args[3]);
         Verify(assemblies, "DummyDll");
+        var application = new List<OperationProgress>();
+        var app = new AppModel(model, false).Build(package.Metadata.GamePlugin?.DefaultUnityVersion, progressCallback: application.Add);
+        Verify(application, "Application model");
+        var header = new List<OperationProgress>();
+        new CppScaffolding(app, useBetterArraySize: true) { ProgressCallback = header.Add }.WriteTypes(Path.Combine(args[3], "il2cpp.h"));
+        Verify(header, "C++ types");
+        var json = new List<OperationProgress>();
+        new JSONMetadata(app) { ProgressCallback = json.Add }.Write(Path.Combine(args[3], "il2cpp.json"));
+        Verify(json, "JSON metadata");
     }
 
     private static void Verify(List<OperationProgress> reports, string label)

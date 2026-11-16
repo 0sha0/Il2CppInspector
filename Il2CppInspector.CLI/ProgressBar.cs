@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 
 namespace Il2CppInspector.CLI
 {
@@ -8,11 +9,15 @@ namespace Il2CppInspector.CLI
         private static readonly object Sync = new();
         private static readonly Stopwatch Elapsed = new();
         private static OperationProgress? active;
+        private static OperationProgress? lastWritten;
         private static int lastLineLength;
         private static int lastBucket = -2;
         private static long lastRefresh;
         private static long generation;
         private static bool running;
+
+        // Set by --json-progress: progress and status messages become one JSON object per line for front ends.
+        public static bool JsonLines { get; set; }
 
         public static void Update(OperationProgress progress)
         {
@@ -36,7 +41,7 @@ namespace Il2CppInspector.CLI
             lock (Sync)
             {
                 FinishLine();
-                Console.WriteLine($"  {message}");
+                Console.WriteLine(JsonLines ? JsonSerializer.Serialize(new { @event = "status", message }) : $"  {message}");
             }
         }
 
@@ -142,6 +147,28 @@ namespace Il2CppInspector.CLI
                 return;
             if (running && active.Value.Total >= 0 && active.Value.Current >= active.Value.Total)
                 return;
+            if (JsonLines)
+            {
+                // The refresh timer redraws unchanged progress; a parser only needs changes, throttled like the interactive bar.
+                if (!force && (active == lastWritten || Elapsed.ElapsedMilliseconds - lastRefresh < 100))
+                    return;
+                var (label, current, total, detail) = active.Value;
+                Console.WriteLine(
+                    JsonSerializer.Serialize(
+                        new
+                        {
+                            @event = "progress",
+                            label,
+                            current,
+                            total,
+                            detail,
+                        }
+                    )
+                );
+                lastWritten = active;
+                lastRefresh = Elapsed.ElapsedMilliseconds;
+                return;
+            }
             int bucket = Percentage(active.Value) / 10;
             if (Console.IsOutputRedirected)
             {
@@ -165,13 +192,14 @@ namespace Il2CppInspector.CLI
         private static void RestartTiming()
         {
             Elapsed.Restart();
+            lastWritten = null;
             lastBucket = -2;
             lastRefresh = -100;
         }
 
         private static void FinishLine()
         {
-            if (active != null && !Console.IsOutputRedirected)
+            if (active != null && !JsonLines && !Console.IsOutputRedirected)
                 Console.WriteLine();
             active = null;
             lastLineLength = 0;

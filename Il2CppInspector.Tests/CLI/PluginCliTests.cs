@@ -12,6 +12,15 @@ namespace Il2CppInspector.Tests.CLI
                 GamePlugins.Installed.All(p => available.Contains(p.GameId)),
                 "Published CLI discovers every game DLL through the plugin loader library"
             );
+            var (listExitCode, listed, _) = TestEnvironment.RunProcess("dotnet", [cli, "--list-games"]);
+            Check(
+                listExitCode == 0
+                    && listed
+                        .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Order(StringComparer.Ordinal)
+                        .SequenceEqual(GamePlugins.Installed.Select(static p => p.GameId).Order(StringComparer.Ordinal)),
+                "--list-games prints every installed GameId once"
+            );
             var isolated = Path.GetFullPath(args[2]);
             Directory.CreateDirectory(isolated);
             foreach (var file in Directory.EnumerateFiles(Path.GetDirectoryName(cli)))

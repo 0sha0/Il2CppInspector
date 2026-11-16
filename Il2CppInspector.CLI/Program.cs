@@ -20,6 +20,7 @@ namespace Il2CppInspector.CLI
         public string OutputDir = "output";
         public List<string> Targets = [];
         public string UnityVersion;
+        public bool JsonProgress;
     }
 
     internal static class NativeDialogs
@@ -336,6 +337,13 @@ namespace Il2CppInspector.CLI
 
                         opts.ImageBase = value;
                         break;
+                    case "--json-progress":
+                        opts.JsonProgress = true;
+                        break;
+                    case "--list-games":
+                        foreach (var gameId in GamePlugins.Installed.Select(static p => p.GameId).Order(StringComparer.OrdinalIgnoreCase))
+                            Console.WriteLine(gameId);
+                        return null;
                     case "-h" or "--help":
                         PrintHelp();
                         return null;
@@ -383,17 +391,18 @@ Options:
                             Auto-detect when omitted
       --unity-version <v>   Unity version override (e.g. 2021.3.0f1)
       --image-base <hex>    Image base address for ELF memory dumps (hex)
+      --json-progress       Write progress and status as JSON lines (used by the GUI)
+      --list-games          List installed game plugin IDs and exit
   -h, --help                Show this help
 
 Output structure:
-  <output>/DummyDll/        .NET assembly shim DLLs
-  <output>/il2cpp.py        Python script (one script target)
-  <output>/il2cpp_t.py      IDA terminal script with checkpoint/resume
-  <output>/il2cpp-<t>.py    Python scripts (multiple script targets)
-  <output>/il2cpp.h         Shared C++ type header for script targets
-  <output>/il2cpp.json      Shared JSON metadata for script targets
-  <output>/<binary>.pdb    Native PDB symbols and types (Debug on PE)
-  <output>/<input-name>    ELF/Mach-O binary with embedded DWARF symbols and types
+  <output>/DummyDll/                .NET assembly shim DLLs
+  <output>/Script_<t>/il2cpp.py     Python script for IDA, Ghidra or BinaryNinja
+  <output>/Script_<t>/il2cpp.h      C++ type header (omitted with Debug)
+  <output>/Script_<t>/il2cpp.json   JSON metadata
+  <output>/Script_IDA/il2cpp_t.py   IDA terminal script with checkpoint/resume
+  <output>/<binary>.pdb             Native PDB symbols and types (Debug on PE)
+  <output>/<input-name>             ELF/Mach-O binary with embedded DWARF symbols and types
 
 Disassembler targets with Debug omit type headers; debug symbol arrays in JSON are empty."
             );
@@ -451,6 +460,8 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
 
         private static void Run(Options options)
         {
+            ProgressBar.JsonLines = options.JsonProgress;
+
             // Fail fast on an unknown --game before touching input files; Main reports the exception.
             if (options.Game != null)
                 GamePlugins.Get(options.Game);
@@ -485,6 +496,7 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
                 catch
                 {
                     Console.Error.WriteLine($"Invalid image base address: {options.ImageBase}");
+                    Environment.ExitCode = 1;
                     return;
                 }
             }
@@ -499,6 +511,7 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
                 catch
                 {
                     Console.Error.WriteLine($"Invalid Unity version: {options.UnityVersion}");
+                    Environment.ExitCode = 1;
                     return;
                 }
             }
@@ -556,29 +569,57 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
                 {
                     AppModel appModel = null;
                     var targetUnity = unityVersion ?? il2cpp.Metadata.GamePlugin?.DefaultUnityVersion;
-                    ProgressBar.Run("Building application model", () => appModel = new AppModel(model, false).Build(targetUnity));
+                    ProgressBar.Run(
+                        "Building application model",
+                        progress => appModel = new AppModel(model, false).Build(targetUnity, progressCallback: progress)
+                    );
 
                     var scriptTargets = options.Targets.Where(t => t != "Debug").ToArray();
                     var supplementMetadata = options.Targets.Contains("Debug");
-                    if (scriptTargets.Length > 0 || options.Targets.Count == 0)
+                    if (options.Targets.Count == 0)
                     {
-                        var header = Path.Combine(output, "il2cpp.h");
-                        var json = Path.Combine(output, "il2cpp.json");
-                        if (!supplementMetadata)
-                            ProgressBar.Run("Generating C++ types", () => new CppScaffolding(appModel, useBetterArraySize: true).WriteTypes(header));
-                        ProgressBar.Run(
-                            "Generating JSON metadata",
-                            () => new JSONMetadata(appModel) { SupplementDebugInfo = supplementMetadata }.Write(json)
-                        );
-                        foreach (var target in scriptTargets)
+                        // Streaming plugins still export the header and JSON metadata without a script target.
+                        WriteScriptInputs(appModel, output, supplementMetadata: false);
+                    }
+
+                    // Each Script_<target> folder holds its script with its own header and JSON so it can be moved on its own.
+                    // Generating them is the expensive part, so later folders copy the first folder's files.
+                    string firstScriptDir = null;
+                    foreach (var target in scriptTargets)
+                    {
+                        var scriptDir = Path.Combine(output, "Script_" + target);
+                        Directory.CreateDirectory(scriptDir);
+                        Console.WriteLine($"Generating {target} script -> {scriptDir}");
+                        if (firstScriptDir == null)
                         {
-                            var pyOut = Path.Combine(output, scriptTargets.Length == 1 ? "il2cpp.py" : $"il2cpp-{target}.py");
+                            WriteScriptInputs(appModel, scriptDir, supplementMetadata);
+                            firstScriptDir = scriptDir;
+                        }
+                        else
+                        {
                             ProgressBar.Run(
-                                $"Generating {target} Python script -> {pyOut}",
+                                "Copying C++ types and JSON metadata",
                                 () =>
-                                    new PythonScript(appModel).WriteScriptToFile(pyOut, target, header, json, includeTypeHeader: !supplementMetadata)
+                                {
+                                    if (!supplementMetadata)
+                                        File.Copy(Path.Combine(firstScriptDir, "il2cpp.h"), Path.Combine(scriptDir, "il2cpp.h"), true);
+                                    File.Copy(Path.Combine(firstScriptDir, "il2cpp.json"), Path.Combine(scriptDir, "il2cpp.json"), true);
+                                }
                             );
                         }
+
+                        var pyOut = Path.Combine(scriptDir, "il2cpp.py");
+                        ProgressBar.Run(
+                            $"Generating {target} Python script",
+                            () =>
+                                new PythonScript(appModel).WriteScriptToFile(
+                                    pyOut,
+                                    target,
+                                    Path.Combine(scriptDir, "il2cpp.h"),
+                                    Path.Combine(scriptDir, "il2cpp.json"),
+                                    includeTypeHeader: !supplementMetadata
+                                )
+                        );
                     }
 
                     // Debug outputs materialize native layouts; finish streaming script exports first.
@@ -586,7 +627,8 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
                     {
                         var pdbOut = Path.Combine(output, Path.GetFileNameWithoutExtension(options.BinaryFile) + ".pdb");
                         PdbOutputResult pdb = null;
-                        ProgressBar.Run($"Generating PDB -> {pdbOut}", () => pdb = new PdbOutput(appModel).Write(pdbOut));
+                        Console.WriteLine($"Generating PDB -> {pdbOut}");
+                        ProgressBar.Run("Generating PDB", () => pdb = new PdbOutput(appModel).Write(pdbOut));
                         Console.WriteLine(
                             $"PDB: {pdb.Functions} functions, {pdb.TypedFunctions} typed, {pdb.Globals} globals, {pdb.TypeRecords} type records."
                         );
@@ -597,10 +639,8 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
                     {
                         var dwarfOut = Path.Combine(output, Path.GetFileName(options.BinaryFile));
                         DwarfOutputResult dwarf = null;
-                        ProgressBar.Run(
-                            $"Embedding DWARF -> {dwarfOut}",
-                            () => dwarf = new DwarfOutput(appModel).WriteImage(dwarfOut, options.BinaryFile)
-                        );
+                        Console.WriteLine($"Embedding DWARF -> {dwarfOut}");
+                        ProgressBar.Run("Embedding DWARF", () => dwarf = new DwarfOutput(appModel).WriteImage(dwarfOut, options.BinaryFile));
                         Console.WriteLine(
                             $"DWARF: {dwarf.Functions} functions, {dwarf.TypedFunctions} typed, {dwarf.Globals} globals, {dwarf.TypeRecords} type records, {dwarf.CompilationUnits} units."
                         );
@@ -612,6 +652,26 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
             }
 
             Console.WriteLine("Done.");
+        }
+
+        // With Debug the debugger symbols carry the types, so the header is skipped and the JSON supplements them.
+        private static void WriteScriptInputs(AppModel appModel, string directory, bool supplementMetadata)
+        {
+            if (!supplementMetadata)
+                ProgressBar.Run(
+                    "Generating C++ types",
+                    progress =>
+                        new CppScaffolding(appModel, useBetterArraySize: true) { ProgressCallback = progress }.WriteTypes(
+                            Path.Combine(directory, "il2cpp.h")
+                        )
+                );
+            ProgressBar.Run(
+                "Generating JSON metadata",
+                progress =>
+                    new JSONMetadata(appModel) { SupplementDebugInfo = supplementMetadata, ProgressCallback = progress }.Write(
+                        Path.Combine(directory, "il2cpp.json")
+                    )
+            );
         }
     }
 }
