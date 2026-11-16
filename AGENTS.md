@@ -6,7 +6,9 @@
 
 - `Il2CppInspector.slnx`：.NET 10 解决方案；`VersionedSerialization.Generator` 是 Roslyn 源生成器，目标为 `netstandard2.0`，只能使用该框架可用的 API。
 - 除 `VersionedSerialization*` 外，项目均为 `Nullable disable`、`ImplicitUsings enable`。不要在禁用可空的项目里零散添加 `?` 注解，也不要重复引入隐式命名空间。
-- Release 构建必须 0 警告、0 错误（唯一的既有例外是完整重建时 `VersionedSerialization.Generator` 的 RS2008）；不通过 `#pragma`、`!` 或 `NoWarn` 规避警告。
+- Release 构建必须 0 警告、0 错误；不通过 `#pragma`、`!` 或 `NoWarn` 规避警告。`VersionedSerialization.Generator` 新增或修改诊断 ID 时，同步更新 `AnalyzerReleases.Unshipped.md`（Roslyn 发布跟踪，缺失时报 RS2000/RS2008）。
+- `dotnet clean Il2CppInspector.slnx` 删除所有项目的 `bin/` 和全部配置的 `obj/<Configuration>/`（根 `Directory.Build.targets`，保留 `obj/` 下的 NuGet 还原文件），并在 `Il2CppInspector.GUI/target` 存在时执行 `cargo clean`（`Directory.Solution.targets`）。
+- `Il2CppInspector.GUI` 是独立的 Rust crate（GPUI 0.2.2），不在 `.slnx` 中；`Cargo.toml` 关闭调试信息和增量编译以减小 `target/` 占用。构建解决方案时 `Directory.Solution.targets` 随后执行 `cargo build`（Release 配置加 `--release`），cargo 编译失败即构建失败；找不到 cargo 时给出警告并跳过 GUI 的构建与清理，这是 0 警告要求之外唯一允许的警告。
 - 新增插件项目时：
   - 目录 `Il2CppInspector.Plugin/<GameId>/`，项目名 `Il2CppInspector.Plugin.<GameId>.csproj`（即程序集名），设置 `EnableDynamicLoading=true`、引用 Common，并显式设置 `RootNamespace` 为 `Il2CppInspector.Plugin.<game>`；
   - 加入 `Il2CppInspector.slnx` 的 `/Plugins/<game>/` 解决方案文件夹，同一游戏的各版本放在同一文件夹下；
@@ -18,6 +20,7 @@
 | 路径 | 职责 |
 | --- | --- |
 | `Il2CppInspector.CLI` | 命令行入口、输出目标选择、插件发现与进度显示。 |
+| `Il2CppInspector.GUI` | Rust + GPUI 桌面前端：以 `--json-progress` 启动 CLI 子进程并显示任务进度，不链接 .NET 程序集。 |
 | `Il2CppInspector.Common/IL2CPP` | 元数据与二进制加载、版本判断、注册结构扫描。 |
 | `Il2CppInspector.Common/Next` | 版本化元数据与二进制记录定义。 |
 | `Il2CppInspector.Common/FileFormatStreams` | PE/ELF/Mach-O/NSO 等文件格式读取。 |
@@ -55,7 +58,9 @@
 
 - 只负责命令行解析、插件发现与匹配、阶段进度显示和输出目标调度，不放元数据解码或模型分析逻辑。
 - 自动识别插件有歧义（多个插件同时匹配）时列出候选并要求显式传入 `--game <GameId>`；显式指定 `--game` 但无匹配或文件不匹配时直接报错退出。
-- `-t IDA` 同时输出 GUI 版 `il2cpp.py` 和 idat 终端版 `il2cpp_t.py`；多目标时在 IDA 脚本名后加 `_t`。终端版依赖 tqdm，支持双行进度、按 q 保存退出，以及通过脚本旁的 `.progress.json` 恢复匹配数据库中的顺序进度。
+- 输出目录布局：`DummyDll/`；每个脚本目标一个 `Script_<target>/`（`il2cpp.py`、`il2cpp.json`，未选 Debug 时还有 `il2cpp.h`），头文件与 JSON 只生成一次，其余目标目录复制；Debug 在根目录写 `<binary>.pdb` 或嵌入 DWARF 的二进制。未选目标的流式导出插件（MORAX）仍在根目录写 `il2cpp.h` 与 `il2cpp.json`。
+- `-t IDA` 在 `Script_IDA/` 中同时输出 GUI 版 `il2cpp.py` 和 idat 终端版 `il2cpp_t.py`。终端版依赖 tqdm，支持双行进度、按 q 保存退出，以及通过脚本旁的 `.progress.json` 恢复匹配数据库中的顺序进度。
+- `--json-progress` 把 `ProgressBar` 的进度与状态改为每行一个 JSON 对象（`{"event":"progress",label,current,total,detail}` / `{"event":"status",message}`），`--list-games` 每行输出一个已安装的 `GameId`；两者是 GUI 依赖的接口，修改时同步更新 `Il2CppInspector.GUI/src/cli.rs`。
 
 ### 3.2 `Il2CppInspector.Common`
 
@@ -92,6 +97,14 @@
   - 被更强断言覆盖的格式细节；
   - 简单 getter；
   - 只测试 .NET 或第三方库自身行为的测试。
+
+### 3.5 `Il2CppInspector.GUI`
+
+- 布局为三列：启动器（游戏选择、路径、输出目标）、任务列表、任务详情，其余 CLI 选项放在可拖动的 Settings 窗口。
+- 任务详情只显示请求参数、阶段进度、最终状态和 CLI 的标准错误；其余标准输出只写入 Copy 复制的日志。CLI 的进度标签因此不带输出路径，路径写在标签前的普通输出行里。
+- 游戏选择按 `GameId` 的四段逐列展开（Game → Region → Platform → Version），某列只有一个选项时自动选中并展开下一列；Auto-detect 不传 `--game`。
+- 不复制 CLI 的校验或插件知识：游戏列表来自 `--list-games`，错误信息来自 CLI 的标准错误输出。
+- `cargo fmt`（行宽 150，`rustfmt.toml`）、`cargo clippy --release --all-targets` 无警告；不使用 `unwrap`/`expect`/`panic`。单元测试放在各模块的 `#[cfg(test)] mod tests`。
 
 ## 4. 进度与错误处理
 
@@ -189,6 +202,10 @@ dotnet run --project Il2CppInspector.Tests -c Release --no-build -- --progress
 dotnet run --project Il2CppInspector.Tests -c Release --no-build -- --cli-targets Il2CppInspector.CLI/bin/Release/net10.0/Il2CppInspector.dll
 dotnet run --project Il2CppInspector.Tests -c Release --no-build -- --cpp-layout
 python -I Il2CppInspector.Tests/Common/Outputs/ScriptResourcesTests.py
+# 修改 GUI 时（在 Il2CppInspector.GUI/ 下）
+cargo fmt --check
+cargo clippy --release --all-targets
+cargo test --release
 # 修改插件时在真实样本上运行
 dotnet run --project Il2CppInspector.Tests -c Release --no-build -- --game <GameId> <样本 Native 目录> [输出目录]
 ```
@@ -198,7 +215,7 @@ dotnet run --project Il2CppInspector.Tests -c Release --no-build -- --game <Game
 ## 8. 文档与交付
 
 - 保留工作树中已有的未提交改动：不执行 `git checkout`/`restore`/`reset --hard`/`stash`/`clean` 等会丢弃改动的命令；除非明确要求，不要提交。
-- 不提交 `bin/`、`obj/` 和 `output/` 等生成内容。
+- 不提交 `bin/`、`obj/`、`output/` 和 `Il2CppInspector.GUI/target/` 等生成内容；`Il2CppInspector.GUI/Cargo.lock` 需要提交。
 - 支持的游戏、`GameId` 或 CLI 选项变化时，同步更新本文件第 2 节、`Il2CppInspector.Plugin/README.md` 和 CLI 帮助文本。
 - 提交信息使用 Conventional Commits 格式：`type(scope): summary`。
   - `type` 取 `feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`chore`；

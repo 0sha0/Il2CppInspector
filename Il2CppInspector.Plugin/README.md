@@ -7,7 +7,7 @@ dotnet build Il2CppInspector.slnx -c Release
 dotnet Il2CppInspector.CLI/bin/Release/net10.0/Il2CppInspector.dll --game NAME_REGION_PLATFORM_VERSION -i GameAssembly.dll -m global-metadata.dat -o output/game -t IDA
 ```
 
-`--game` takes an installed `GameId` (case-insensitive; `x.x.x` matches multiple versions). When omitted, metadata is matched automatically; ambiguous matches require `--game`, and unmatched files use the stock loader. `-t IDA` writes both GUI `il2cpp.py` and idat terminal `il2cpp_t.py` (`il2cpp-IDA_t.py` when combined with other script targets), which supports `tqdm` progress, `q` to save and exit, and `.progress.json` checkpoint resume.
+`--game` takes an installed `GameId` (case-insensitive; `x.x.x` matches multiple versions). When omitted, metadata is matched automatically; ambiguous matches require `--game`, and unmatched files use the stock loader. `-t IDA` writes both GUI `il2cpp.py` and idat terminal `il2cpp_t.py` to `Script_IDA/`, which supports `tqdm` progress, `q` to save and exit, and `.progress.json` checkpoint resume. Each script target gets its own `Script_<target>/` folder with `il2cpp.h` and `il2cpp.json`.
 
 | Game | Supported ID |
 | --- | --- |
