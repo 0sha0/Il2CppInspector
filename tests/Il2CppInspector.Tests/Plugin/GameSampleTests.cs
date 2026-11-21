@@ -17,6 +17,7 @@ internal static class GameSampleTests
             "UserAssembly.dll",
             "types=77799 methods=561798 fields=362445 params=460434 literals=104856 typeRefs=469900 methodSpecs=251755 usages=348209 attributes=41122 Il2CppClass=0xD8 Il2CppClass.static_fields=0x30 Il2CppClass.vtable_count=0xCE MethodInfo=0x40 MethodInfo.flags=0x30 Il2CppCodeRegistration=0x98 Il2CppMetadataRegistration=0xA8"
         ),
+        ["Cy_JP_Windows_x.x.x"] = ("GameAssembly.dll", null),
         ["Endfield_CN_Android_x.x.x"] = ("libil2cpp.so", null),
         ["Endfield_CN_Windows_1.6.3"] = (
             "GameAssembly.dll",
@@ -35,6 +36,10 @@ internal static class GameSampleTests
         ["LAD_CN_Android_6.0.0"] = (
             "libil2cpp.so",
             "types=45515 methods=314124 fields=179776 params=402106 literals=62223 typeRefs=125923 methodSpecs=112354 usages=225701 attributes=0 Il2CppClass=0x320 Il2CppClass.static_fields=0xB0 Il2CppClass.vtable_count=0x10E MethodInfo=0x58 MethodInfo.flags=0x4C Il2CppCodeRegistration=0x78 Il2CppMetadataRegistration=0x80"
+        ),
+        ["LimbusCompany_OS_Windows_1.119.1"] = (
+            "GameAssembly.dll",
+            "types=52822 methods=331647 fields=218052 params=387213 literals=39569 typeRefs=126900 methodSpecs=372767 usages=147606 attributes=0 Il2CppClass=0x338 Il2CppClass.static_fields=0xB8 Il2CppClass.vtable_count=0x12A MethodInfo=0x58 MethodInfo.flags=0x4C Il2CppCodeRegistration=0x88 Il2CppMetadataRegistration=0x80"
         ),
         ["NSH_OS_Windows_20260731072817UTC"] = (
             "GameAssembly.dll",
@@ -80,9 +85,15 @@ internal static class GameSampleTests
         var (binary, baseline) = Samples[gameId];
         var plugin = GamePlugins.Get(gameId);
         var metadataPath = Path.Combine(directory, "global-metadata.dat");
-        Check(plugin.Matches(File.ReadAllBytes(metadataPath)), $"{gameId} matches its sample metadata");
-
-        var package = Inspector.LoadFromFile(Path.Combine(directory, binary), metadataPath, new LoadOptions { Game = gameId }).Single();
+        bool requiresMetadata = plugin.RequiredInputs.HasFlag(GamePluginInputs.Metadata);
+        byte[] metadata = requiresMetadata && File.Exists(metadataPath) ? File.ReadAllBytes(metadataPath) : [];
+        using (var binaryStream = File.OpenRead(Path.Combine(directory, binary)))
+        {
+            Check(plugin.Matches(binaryStream, metadata), $"{gameId} matches its sample input");
+        }
+        var package = Inspector
+            .LoadFromFile(Path.Combine(directory, binary), requiresMetadata ? metadataPath : null, new LoadOptions { Game = gameId })
+            .Single();
         var model = new TypeModel(package);
         var app = new AppModel(model, false).Build(plugin.DefaultUnityVersion);
         var objectHeaderSize = package.BinaryImage.Bits / 8 * 2;
