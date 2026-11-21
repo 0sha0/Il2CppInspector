@@ -90,6 +90,9 @@ namespace Il2CppInspector.Cpp.UnityHeaders
             {
                 Name = name;
                 VersionRange = UnityVersionRange.FromFilename(name);
+                // Unity 6 snapshots remain candidates until a newer applicable snapshot is selected.
+                if (VersionRange.Min.Major >= 6000 && VersionRange.Min == VersionRange.Max)
+                    VersionRange = new UnityVersionRange(VersionRange.Min, null);
             }
 
             public override string ToString() => Name + " for " + VersionRange;
@@ -115,7 +118,8 @@ namespace Il2CppInspector.Cpp.UnityHeaders
         public static UnityHeaders ForPlugin(UnityVersion baseVersion, UnityVersion runtimeVersion, Func<string, string> transformTypes) =>
             new(GetTypeHeaderForVersion(baseVersion), GetAPIHeaderForVersion(baseVersion), transformTypes, runtimeVersion);
 
-        public static UnityResource GetTypeHeaderForVersion(UnityVersion version) => GetAllTypeHeaders().First(r => r.VersionRange.Contains(version));
+        public static UnityResource GetTypeHeaderForVersion(UnityVersion version) =>
+            GetAllTypeHeaders().Where(r => r.VersionRange.Contains(version)).OrderByDescending(r => r.VersionRange.Min).First();
 
         // Get the API header file which supports the given version of Unity
         public static UnityResource GetAPIHeaderForVersion(UnityVersion version) => GetAllAPIHeaders().First(r => r.VersionRange.Contains(version));

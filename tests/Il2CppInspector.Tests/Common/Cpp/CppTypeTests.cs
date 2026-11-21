@@ -65,6 +65,31 @@ namespace Il2CppInspector.Tests.Common.Cpp
             bitLayout.AddField("next", unionTypes.GetType("uint32_t"), bitfield: 20);
             bitLayout.AddField("another", unionTypes.GetType("uint32_t"), bitfield: 20);
             Check(bitLayout["another"].Offset == 64, "Bitfields do not straddle an unpacked storage unit");
+            // Unity 6000.3: Class::FromTypeDefinition (0x1807C1520), Class::SetupFields (0x1808156A0),
+            // Class::SetClassInitializationError (0x180817A20) and MetadataCache::Initialize (0x180819680).
+            var unity6Headers = UnityHeaders.GetHeadersForVersion("6000.3.12f1");
+            Check(unity6Headers.MetadataVersion.Major == 39, "Unity 6 patch releases select the newest applicable snapshot header");
+            var unity6 = CppTypeCollection.FromUnityHeaders(unity6Headers);
+            var runtimeClass = unity6.GetComplexType("Il2CppClass");
+            var mergedClass = unity6.GetComplexType("Il2CppClass_Merged");
+            Check(
+                runtimeClass["initializationExceptionGCHandle"].Type.SizeBytes == 8
+                    && runtimeClass["stack_slot_size"].OffsetBytes == 0xFC
+                    && runtimeClass["vtable_count"].OffsetBytes == 0x12A
+                    && runtimeClass["packingSize"].OffsetBytes == 0x134
+                    && runtimeClass["vtable"].OffsetBytes == 0x138
+                    && mergedClass.Flattened["vtable_count"].OffsetBytes == 0x12A,
+                "Unity 6000.3 class layouts include pointer-sized GC handles and stack slot sizes"
+            );
+            var registration = unity6.GetComplexType("Il2CppCodeRegistration");
+            Check(
+                registration.SizeBytes == 0x88
+                    && registration["unresolvedInstanceCallPointers"].OffsetBytes == 0x48
+                    && registration["unresolvedStaticCallPointers"].OffsetBytes == 0x50
+                    && registration["interopDataCount"].OffsetBytes == 0x58
+                    && registration["codeGenModules"].OffsetBytes == 0x80,
+                "Unity 6000.3 code registration includes all unresolved call pointer tables"
+            );
             if (clang != null)
                 VerifyCompilerLayouts(clang);
         }
@@ -82,7 +107,7 @@ namespace Il2CppInspector.Tests.Common.Cpp
                         "-ffreestanding",
                         "-fms-extensions",
                         "-fsyntax-only",
-                        "-I" + TestEnvironment.RepositoryPath("Il2CppInspector.Common"),
+                        "-I" + TestEnvironment.RepositoryPath("src", "Common", "Il2CppInspector.Common"),
                         fixture,
                     ]
                 );
