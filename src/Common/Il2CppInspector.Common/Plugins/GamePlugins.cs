@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using McMaster.NETCore.Plugins;
 
 namespace Il2CppInspector.Plugins
@@ -23,12 +25,12 @@ namespace Il2CppInspector.Plugins
                 );
         }
 
-        internal static GamePlugin Select(string gameId, ReadOnlySpan<byte> metadata)
+        internal static GamePlugin Select(string gameId, ReadOnlySpan<byte> metadata, Stream binary = null)
         {
             if (gameId != null)
             {
                 var selected = Get(gameId);
-                if (!selected.Matches(metadata))
+                if (!Matches(selected, binary, metadata))
                 {
                     throw new InvalidDataException($"Metadata does not match game plugin {selected.GameId}.");
                 }
@@ -38,7 +40,7 @@ namespace Il2CppInspector.Plugins
             List<GamePlugin> matches = [];
             foreach (var plugin in Installed)
             {
-                if (plugin.Matches(metadata))
+                if (Matches(plugin, binary, metadata))
                 {
                     matches.Add(plugin);
                 }
@@ -54,8 +56,27 @@ namespace Il2CppInspector.Plugins
             };
         }
 
+        private static bool Matches(GamePlugin plugin, Stream binary, ReadOnlySpan<byte> metadata)
+        {
+            if (!plugin.RequiredInputs.HasFlag(GamePluginInputs.Metadata))
+                metadata = [];
+            if (binary == null)
+                return plugin.Matches(metadata);
+            long position = binary.Position;
+            try
+            {
+                binary.Position = 0;
+                return plugin.Matches(binary, metadata);
+            }
+            finally
+            {
+                binary.Position = position;
+            }
+        }
+
         private static IReadOnlyList<GamePlugin> Discover()
         {
+            AssemblyLoadContext.Default.ResolvingUnmanagedDll += ResolveNativeLibrary;
             var assemblies = new HashSet<Assembly>(
                 AppDomain
                     .CurrentDomain.GetAssemblies()
@@ -82,6 +103,7 @@ namespace Il2CppInspector.Plugins
                             sharedTypes: [typeof(GamePlugin)],
                             configure: config => config.PreferSharedTypes = true
                         );
+                        loader.LoadContext.ResolvingUnmanagedDll += ResolveNativeLibrary;
                         loaders.Add(loader);
                         assembly = loader.LoadDefaultAssembly();
                     }
@@ -100,6 +122,25 @@ namespace Il2CppInspector.Plugins
             }
 
             return result;
+        }
+
+        private static IntPtr ResolveNativeLibrary(Assembly _, string libraryName)
+        {
+            // Native assets are shared by all plugins in runtime/<rid>/native rather than beside each DLL.
+            var directory = Path.Combine(AppContext.BaseDirectory, "runtime", RuntimeInformation.RuntimeIdentifier, "native");
+            var extension =
+                OperatingSystem.IsWindows() ? ".dll"
+                : OperatingSystem.IsMacOS() ? ".dylib"
+                : ".so";
+            var names = OperatingSystem.IsWindows()
+                ? new[] { libraryName, libraryName + extension }
+                : new[] { libraryName, libraryName + extension, "lib" + libraryName + extension };
+            foreach (var name in names)
+            {
+                if (NativeLibrary.TryLoad(Path.Combine(directory, name), out var handle))
+                    return handle;
+            }
+            return IntPtr.Zero;
         }
     }
 }

@@ -389,25 +389,48 @@ namespace Il2CppInspector
         // Load from a binary file and metadata file
         public static List<Il2CppInspector> LoadFromFile(
             string binaryFile,
-            string metadataFile,
+            string metadataFile = null,
             LoadOptions loadOptions = null,
             EventHandler<string> statusCallback = null,
             bool silent = false
         )
         {
-            using var binary = File.OpenRead(binaryFile);
-            var metadataData = File.ReadAllBytes(metadataFile);
+            var explicitPlugin = loadOptions?.Game == null ? null : Plugins.GamePlugins.Get(loadOptions.Game);
+            using Stream binary =
+                explicitPlugin != null && !explicitPlugin.RequiredInputs.HasFlag(Plugins.GamePluginInputs.Binary)
+                    ? new MemoryStream()
+                    : File.OpenRead(RequireFile(binaryFile, "Binary"));
+            var selectedPlugin = explicitPlugin ?? Plugins.GamePlugins.Select(null, [], binary);
+            var inputs = selectedPlugin?.RequiredInputs ?? (Plugins.GamePluginInputs.Binary | Plugins.GamePluginInputs.Metadata);
+            var metadataData = inputs.HasFlag(Plugins.GamePluginInputs.Metadata) ? File.ReadAllBytes(RequireFile(metadataFile, "Metadata")) : [];
             using var metadata = new MemoryStream(metadataData);
-            var selectedPlugin = Plugins.GamePlugins.Select(loadOptions?.Game, metadataData);
-            var startupPath = loadOptions?.StartupMetadataPath;
-            if (startupPath == null && selectedPlugin?.StartupMetadataFileName is { } startupFile)
+            if (explicitPlugin != null)
+                selectedPlugin = Plugins.GamePlugins.Select(explicitPlugin.GameId, metadataData, binary);
+            else
+                selectedPlugin ??= Plugins.GamePlugins.Select(null, metadataData, binary);
+            string startupPath = null;
+            if (selectedPlugin?.RequiredInputs.HasFlag(Plugins.GamePluginInputs.StartupMetadata) == true)
             {
-                var candidate = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(metadataFile)), startupFile);
-                if (File.Exists(candidate))
-                    startupPath = candidate;
+                startupPath = loadOptions?.StartupMetadataPath;
+                if (startupPath == null && selectedPlugin.StartupMetadataFileName is { } startupFile)
+                {
+                    var candidate = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(metadataFile ?? binaryFile)), startupFile);
+                    if (File.Exists(candidate))
+                        startupPath = candidate;
+                }
+                startupPath = RequireFile(startupPath, "Startup metadata");
             }
             using var startup = startupPath == null ? null : new MemoryStream(File.ReadAllBytes(startupPath));
-            return LoadFromStream(binary, metadata, loadOptions, statusCallback, silent, startup);
+            return LoadFromStreamCore(binary, metadata, loadOptions, statusCallback, silent, startup, selectedPlugin, pluginResolved: true);
+
+            static string RequireFile(string path, string label)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    throw new ArgumentException($"{label} file is required by the selected input format.");
+                if (!File.Exists(path))
+                    throw new FileNotFoundException($"{label} file not found: {path}", path);
+                return path;
+            }
         }
 
         // Load from a binary stream and metadata stream
@@ -419,6 +442,17 @@ namespace Il2CppInspector
             EventHandler<string> statusCallback = null,
             bool silent = false,
             MemoryStream startupMetadataStream = null
+        ) => LoadFromStreamCore(binaryStream, metadataStream, loadOptions, statusCallback, silent, startupMetadataStream);
+
+        private static List<Il2CppInspector> LoadFromStreamCore(
+            Stream binaryStream,
+            MemoryStream metadataStream,
+            LoadOptions loadOptions,
+            EventHandler<string> statusCallback,
+            bool silent,
+            MemoryStream startupMetadataStream,
+            Plugins.GamePlugin selectedPlugin = null,
+            bool pluginResolved = false
         )
         {
             // Silent operation if requested
@@ -426,23 +460,37 @@ namespace Il2CppInspector
             if (silent)
                 Console.SetOut(new StreamWriter(Stream.Null));
 
-            Plugins.GamePlugin selectedPlugin;
             var metadataData = metadataStream.ToArray();
-            try
+            if (!pluginResolved)
             {
-                selectedPlugin = Plugins.GamePlugins.Select(loadOptions?.Game, metadataData);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine(ex.Message);
-                Console.SetOut(stdout);
-                return null;
+                try
+                {
+                    selectedPlugin =
+                        loadOptions?.Game == null
+                            ? Plugins.GamePlugins.Select(null, [], binaryStream) ?? Plugins.GamePlugins.Select(null, metadataData, binaryStream)
+                            : Plugins.GamePlugins.Select(loadOptions.Game, metadataData, binaryStream);
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(ex.Message);
+                    Console.SetOut(stdout);
+                    return null;
+                }
             }
             if (selectedPlugin != null)
             {
                 try
                 {
-                    return [selectedPlugin.Load(binaryStream, metadataData, startupMetadataStream?.ToArray(), loadOptions, statusCallback)];
+                    return
+                    [
+                        selectedPlugin.Load(
+                            binaryStream,
+                            selectedPlugin.RequiredInputs.HasFlag(Plugins.GamePluginInputs.Metadata) ? metadataData : [],
+                            selectedPlugin.RequiredInputs.HasFlag(Plugins.GamePluginInputs.StartupMetadata) ? startupMetadataStream?.ToArray() : null,
+                            loadOptions,
+                            statusCallback
+                        ),
+                    ];
                 }
                 catch (Exception ex)
                 {

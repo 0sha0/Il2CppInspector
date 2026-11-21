@@ -10,7 +10,11 @@ namespace Il2CppInspector.Tests.Common.Plugins
                     ReferenceEquals(GamePlugins.Get(plugin.GameId.ToLowerInvariant()), plugin),
                     "Game selection remains case-insensitive: " + plugin.GameId
                 );
-                Check(!plugin.Matches([]) && !plugin.Matches("stock"u8), "Plugin rejects truncated and foreign metadata: " + plugin.GameId);
+                using var truncatedBinary = new MemoryStream("MZ"u8.ToArray());
+                Check(
+                    !plugin.Matches([]) && !plugin.Matches("stock"u8) && !plugin.Matches(Stream.Null, []) && !plugin.Matches(truncatedBinary, []),
+                    "Plugin rejects truncated and foreign inputs: " + plugin.GameId
+                );
             }
             Plugin.GameSampleTests.RunInstalled();
         }

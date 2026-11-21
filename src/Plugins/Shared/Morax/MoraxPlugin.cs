@@ -9,6 +9,7 @@ namespace Il2CppInspector.Plugin.Morax;
 /// <summary>Plugin entry shared by the MORAX games: PE x64 binary, embedded header and startup-metadata.dat.</summary>
 public abstract class MoraxPlugin : GamePlugin
 {
+    public override GamePluginInputs RequiredInputs => base.RequiredInputs | GamePluginInputs.StartupMetadata;
     public override string StartupMetadataFileName => "startup-metadata.dat";
     public override bool StreamExports => true;
     public override UnityVersion DefaultUnityVersion => new("2019.4.40f1");

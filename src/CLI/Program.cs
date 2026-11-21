@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Text.Json;
 using Il2CppInspector.Cpp.UnityHeaders;
 using Il2CppInspector.Model;
 using Il2CppInspector.Outputs;
@@ -246,6 +247,7 @@ namespace Il2CppInspector.CLI
         private static Options ParseArgs(string[] args)
         {
             Options opts = new();
+            bool listGames = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -341,9 +343,8 @@ namespace Il2CppInspector.CLI
                         opts.JsonProgress = true;
                         break;
                     case "--list-games":
-                        foreach (var gameId in GamePlugins.Installed.Select(static p => p.GameId).Order(StringComparer.OrdinalIgnoreCase))
-                            Console.WriteLine(gameId);
-                        return null;
+                        listGames = true;
+                        break;
                     case "-h" or "--help":
                         PrintHelp();
                         return null;
@@ -355,11 +356,27 @@ namespace Il2CppInspector.CLI
                 }
             }
 
-            if (string.IsNullOrEmpty(opts.BinaryFile) || string.IsNullOrEmpty(opts.MetadataFile))
+            if (listGames)
             {
-                Console.Error.WriteLine("Both --bin and --metadata are required.");
-                Environment.ExitCode = 1;
-                PrintHelp();
+                foreach (var plugin in GamePlugins.Installed.OrderBy(static p => p.GameId, StringComparer.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine(
+                        opts.JsonProgress
+                            ? JsonSerializer.Serialize(
+                                new
+                                {
+                                    gameId = plugin.GameId,
+                                    inputs = new
+                                    {
+                                        binary = plugin.RequiredInputs.HasFlag(GamePluginInputs.Binary),
+                                        metadata = plugin.RequiredInputs.HasFlag(GamePluginInputs.Metadata),
+                                        startupMetadata = plugin.RequiredInputs.HasFlag(GamePluginInputs.StartupMetadata),
+                                    },
+                                }
+                            )
+                            : plugin.GameId
+                    );
+                }
                 return null;
             }
 
@@ -376,8 +393,8 @@ Usage:
   Il2CppInspector                      (Windows: open file dialogs)
 
 Options:
-  -i, --bin <file>          IL2CPP binary file (required)
-  -m, --metadata <file>     global-metadata.dat file (required)
+  -i, --bin <file>          IL2CPP binary file (required by the selected plugin)
+  -m, --metadata <file>     global-metadata.dat file (ignored by embedded-metadata plugins)
   -o, --output <dir>        Output directory (default: output)
   -t, --target <t>          Output target: IDA, BinaryNinja, Ghidra, Debug
                             Repeat to select multiple targets: -t IDA -t Debug
@@ -386,13 +403,16 @@ Options:
                             Debug: PE -> PDB (x64); ELF/Mach-O -> DWARF
                             DWARF supports little-endian x86/x64/ARM/ARM64 images
       --startup-metadata <f> Plugin startup metadata (auto-detected beside metadata)
+                            Unused input files are ignored according to the plugin
       --game <id>           Game plugin: NAME_REGION_PLATFORM_VERSION
                             e.g. Endfield_CN_Android_x.x.x, NSH_OS_Windows_20260731072817UTC
+                            LimbusCompany_OS_Windows_1.119.1 accepts encrypted metadata
                             Auto-detect when omitted
       --unity-version <v>   Unity version override (e.g. 2021.3.0f1)
       --image-base <hex>    Image base address for ELF memory dumps (hex)
       --json-progress       Write progress and status as JSON lines (used by the GUI)
       --list-games          List installed game plugin IDs and exit
+                            With --json-progress, include input requirements as JSON lines
   -h, --help                Show this help
 
 Output structure:
@@ -427,15 +447,29 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
 
             Console.WriteLine($"Binary: {binary}");
 
-            string metadata = NativeDialogs.ShowOpenFileDialog("Select global-metadata.dat", "Metadata (*.dat)\0*.dat\0All files (*.*)\0*.*\0");
-
-            if (string.IsNullOrEmpty(metadata))
+            GamePlugin binaryPlugin;
+            try
             {
-                Console.Error.WriteLine("No metadata file selected.");
+                using var input = File.OpenRead(binary);
+                binaryPlugin = GamePlugins.Select(null, [], input);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
                 return;
             }
-
-            Console.WriteLine($"Metadata: {metadata}");
+            string metadata = null;
+            if (binaryPlugin == null || binaryPlugin.RequiredInputs.HasFlag(GamePluginInputs.Metadata))
+            {
+                metadata = NativeDialogs.ShowOpenFileDialog("Select global-metadata.dat", "Metadata (*.dat)\0*.dat\0All files (*.*)\0*.*\0");
+                if (string.IsNullOrEmpty(metadata))
+                {
+                    Console.Error.WriteLine("No metadata file selected.");
+                    return;
+                }
+                Console.WriteLine($"Metadata: {metadata}");
+            }
 
             string outputDir = NativeDialogs.ShowFolderDialog("Select output folder");
 
@@ -462,23 +496,9 @@ Disassembler targets with Debug omit type headers; debug symbol arrays in JSON a
         {
             ProgressBar.JsonLines = options.JsonProgress;
 
-            // Fail fast on an unknown --game before touching input files; Main reports the exception.
+            // Resolve an explicit plugin before parsing its input files.
             if (options.Game != null)
                 GamePlugins.Get(options.Game);
-
-            if (!File.Exists(options.BinaryFile))
-            {
-                Console.Error.WriteLine($"Binary file not found: {options.BinaryFile}");
-                Environment.ExitCode = 1;
-                return;
-            }
-
-            if (!File.Exists(options.MetadataFile))
-            {
-                Console.Error.WriteLine($"Metadata file not found: {options.MetadataFile}");
-                Environment.ExitCode = 1;
-                return;
-            }
 
             LoadOptions loadOptions = new()
             {
