@@ -274,20 +274,27 @@ def _save_checkpoint(path, identity, status, node):
         or (ida_nalt.retrieve_input_file_sha256() or b"").hex() != identity["input_sha256"]
     ):
         raise ValueError("The active database changed during import; refusing to overwrite the database or checkpoint.")
-    # SDK save_database: flags=0 inherits DBFL_KILL/DBFL_TEMP. A live save must
-    # keep the unpacked database available for subsequent kernel/plugin cleanup.
-    # DBFL_BAK requests a backup of the previous packed database before overwriting it.
+    # SDK save_database: flags=0 uses the current database flags. Temporarily
+    # disable backups and keep live database components available for cleanup.
+    database_flags = {
+        flag: ida_loader.is_database_flag(flag)
+        for flag in (ida_loader.DBFL_KILL, ida_loader.DBFL_COMP, ida_loader.DBFL_BAK, ida_loader.DBFL_TEMP)
+    }
     auto_enabled = ida_auto.enable_auto(False)
     pack_mode = ida_ida.inf_set_pack_mode(ida_ida.IDB_COMPRESSED)
     try:
+        for flag in database_flags:
+            ida_loader.set_database_flag(flag, False)
         commit = uuid.uuid4().hex
         if not node.supset(0, commit):
             raise RuntimeError("Cannot write checkpoint marker to the database.")
         print(f"Saving compressed database: {destination}")
-        if not ida_loader.save_database(str(destination), ida_loader.DBFL_BAK):
+        if not ida_loader.save_database(str(destination), 0):
             print("Save failed. Database remains open; the checkpoint JSON was not advanced.")
             return False
     finally:
+        for flag, enabled in database_flags.items():
+            ida_loader.set_database_flag(flag, enabled)
         ida_ida.inf_set_pack_mode(pack_mode)
         ida_auto.enable_auto(auto_enabled)
     stage, index = max(0, status.stage), status.index

@@ -14,11 +14,11 @@ import uuid
 from unittest.mock import Mock, call, patch
 
 
-ROOT = Path(__file__).resolve().parents[3]
-SCRIPTS = ROOT / "Il2CppInspector.Common/Outputs/ScriptResources"
+ROOT = Path(__file__).resolve().parents[4]
+SCRIPTS = ROOT / "src/Common/Il2CppInspector.Common/Outputs/ScriptResources"
 BADADDR = (1 << 64) - 1
 shared = (SCRIPTS / "shared_base.py").read_text(encoding="utf-8-sig")
-processor = (ROOT / "Il2CppInspector.Plugin/Shared/Morax/RuntimeCaches.py").read_text()
+processor = (ROOT / "src/Plugins/Shared/Morax/RuntimeCaches.py").read_text()
 shared = shared.replace("        # %GAME_METADATA_PROCESSOR%", processor)
 BASE = {}
 exec(compile(shared, "shared_base.py", "exec"), BASE)
@@ -209,8 +209,12 @@ class ScriptResourcesTests(unittest.TestCase):
         auto.enable_auto.return_value = True
         ida = Mock(IDB_COMPRESSED=2, spec=["IDB_COMPRESSED", "inf_set_pack_mode"])
         ida.inf_set_pack_mode.return_value = 1
-        loader = Mock(DBFL_BAK=4, PATH_TYPE_IDB=1,
-                      spec=["DBFL_BAK", "PATH_TYPE_IDB", "get_path", "save_database"])
+        database_flags = dict.fromkeys((1, 2, 4, 8), True)
+        loader = Mock(DBFL_KILL=1, DBFL_COMP=2, DBFL_BAK=4, DBFL_TEMP=8, PATH_TYPE_IDB=1,
+                      spec=["DBFL_KILL", "DBFL_COMP", "DBFL_BAK", "DBFL_TEMP", "PATH_TYPE_IDB",
+                            "get_path", "save_database", "is_database_flag", "set_database_flag"])
+        loader.is_database_flag.side_effect = database_flags.__getitem__
+        loader.set_database_flag.side_effect = database_flags.__setitem__
         segment, nalt = Mock(), Mock()
         segment.get_segm_qty.return_value = 1
         nalt.get_imagebase.return_value = 0x180000000
@@ -224,7 +228,8 @@ class ScriptResourcesTests(unittest.TestCase):
             ns["ida_loader"].get_path.return_value = str(database)
             def save(*args):
                 self.assertEqual(checkpoint.read_text(), "previous")
-                self.assertEqual(args, (str(database), 4), "Live saves must not inherit KILL/TEMP or compact open components")
+                self.assertEqual(args, (str(database), 0))
+                self.assertFalse(any(database_flags.values()), "Live saves must disable backups and preserve open components")
                 self.assertEqual(auto.enable_auto.call_args, call(False))
                 self.assertEqual(ida.inf_set_pack_mode.call_args, call(2))
                 return True
@@ -232,6 +237,7 @@ class ScriptResourcesTests(unittest.TestCase):
             # Pausing while replaying skipped stages must retain the later resume pointer.
             status = types.SimpleNamespace(stage=1, index=2, resume_stage=5, resume_index=7)
             self.assertTrue(ns["_save_checkpoint"](checkpoint, identity, status, node))
+            self.assertTrue(all(database_flags.values()))
             self.assertEqual(auto.enable_auto.call_args_list, [call(False), call(True)])
             self.assertEqual(ida.inf_set_pack_mode.call_args_list, [call(2), call(1)])
 
@@ -486,7 +492,7 @@ class ScriptResourcesTests(unittest.TestCase):
                 self.assertIn(("set_data_comment", (0x2000, "Type")), backend.calls)
 
     def test_morax_native_caches_continue_to_type_references(self):
-        processor = (ROOT / "Il2CppInspector.Plugin/Shared/Morax/RuntimeCaches.py").read_text()
+        processor = (ROOT / "src/Plugins/Shared/Morax/RuntimeCaches.py").read_text()
         source = (SCRIPTS / "shared_base.py").read_text(encoding="utf-8-sig")
         namespace = {}
         exec(compile(source.replace("        # %GAME_METADATA_PROCESSOR%", processor), "morax.py", "exec"), namespace)
