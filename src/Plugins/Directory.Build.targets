@@ -1,0 +1,25 @@
+<Project>
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.targets', '$(MSBuildThisFileDirectory)../'))" />
+  <Target Name="GetGamePluginOutput" DependsOnTargets="ResolveReferences" Returns="@(GamePluginOutput)">
+    <ItemGroup>
+      <GamePluginOutput Include="$(TargetPath)">
+        <PackagePath>plugins/$(TargetFileName)</PackagePath>
+        <LegacyPluginDirectory>$([System.IO.Path]::GetFileName('$(MSBuildProjectDirectory)'))</LegacyPluginDirectory>
+      </GamePluginOutput>
+      <GamePluginOutput Include="$(ProjectDepsFilePath)">
+        <PackagePath>plugins/$(AssemblyName).deps.json</PackagePath>
+      </GamePluginOutput>
+      <GamePluginOutput Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.AssetType)' != 'native'">
+        <PackagePath>plugins/%(ReferenceCopyLocalPaths.DestinationSubDirectory)%(Filename)%(Extension)</PackagePath>
+      </GamePluginOutput>
+      <GamePluginOutput Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.AssetType)' == 'native'">
+        <PackagePath>runtime/%(ReferenceCopyLocalPaths.RuntimeIdentifier)/native/%(Filename)%(Extension)</PackagePath>
+        <PackagePath Condition="'%(ReferenceCopyLocalPaths.RuntimeIdentifier)' == ''"
+          >runtime/$(RuntimeIdentifier)/native/%(Filename)%(Extension)</PackagePath>
+      </GamePluginOutput>
+      <GamePluginOutput Include="@(None)" Condition="'%(None.CopyToOutputDirectory)' != '' and '%(None.CopyToOutputDirectory)' != 'Never'">
+        <PackagePath>%(None.Link)</PackagePath>
+      </GamePluginOutput>
+    </ItemGroup>
+  </Target>
+</Project>

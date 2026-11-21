@@ -1,0 +1,19 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <DebugType>embedded</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == ''">$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+    <IsPublishable>false</IsPublishable>
+    <UnicornPackageVersion>2.1.4-longjmp.2</UnicornPackageVersion>
+    <_UnicornPackageDirectory>$(MSBuildThisFileDirectory)packages</_UnicornPackageDirectory>
+    <_UnicornPackageFile>$(_UnicornPackageDirectory)/UnicornEngine.Unicorn.$(UnicornPackageVersion).nupkg</_UnicornPackageFile>
+    <RestoreAdditionalProjectSources>$(RestoreAdditionalProjectSources);$(_UnicornPackageDirectory)</RestoreAdditionalProjectSources>
+    <PublishDir Condition="'$(MSBuildProjectName)' == 'Il2CppInspector.CLI' and '$(PublishDir)' == ''">$(ArtifactsPath)/publish/</PublishDir>
+  </PropertyGroup>
+</Project>

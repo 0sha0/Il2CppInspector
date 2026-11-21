@@ -1,18 +1,81 @@
 <Project>
-  <!-- Clean only deletes the files recorded for the active configuration. Remove bin/ and every obj/<Configuration>/ instead,
-       keeping the NuGet restore files directly under obj/ so IDEs and Rebuild still find project.assets.json. -->
-  <Target Name="CleanAllConfigurations" AfterTargets="Clean">
+  <UsingTask
+    TaskName="PublishDownloadedUnicornPackage"
+    TaskFactory="RoslynCodeTaskFactory"
+    AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll"
+  >
+    <ParameterGroup>
+      <SourceFile ParameterType="System.String" Required="true" />
+      <DestinationFile ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Code Type="Fragment" Language="cs">
+        <![CDATA[
+        try
+        {
+            File.Move(SourceFile, DestinationFile);
+        }
+        catch (IOException) when (File.Exists(DestinationFile))
+        {
+            // Another restore has already published its completed download.
+            File.Delete(SourceFile);
+        }
+      ]]>
+      </Code>
+    </Task>
+  </UsingTask>
+  <Target
+    Name="DownloadUnicornPackage"
+    BeforeTargets="CollectPackageReferences"
+    Condition="'@(PackageReference->WithMetadataValue('Identity', 'UnicornEngine.Unicorn'))' != '' and !Exists('$(_UnicornPackageFile)')"
+  >
     <PropertyGroup>
-      <_CleanOutputPath>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(BaseOutputPath)'))</_CleanOutputPath>
-      <_CleanIntermediatePath>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)'))</_CleanIntermediatePath>
+      <_UnicornDownloadFile>$(_UnicornPackageFile).$([System.Guid]::NewGuid()).download</_UnicornDownloadFile>
     </PropertyGroup>
+    <DownloadFile
+      SourceUrl="https://github.com/1F1E33-float32/unicorn/releases/download/v$(UnicornPackageVersion)/UnicornEngine.Unicorn.$(UnicornPackageVersion).nupkg"
+      DestinationFolder="$(_UnicornPackageDirectory)"
+      DestinationFileName="$([System.IO.Path]::GetFileName('$(_UnicornDownloadFile)'))"
+      Retries="2"
+    />
+    <PublishDownloadedUnicornPackage SourceFile="$(_UnicornDownloadFile)" DestinationFile="$(_UnicornPackageFile)" />
+    <OnError ExecuteTargets="DeleteUnicornDownload" />
+  </Target>
+  <Target Name="DeleteUnicornDownload">
+    <Delete Files="$(_UnicornDownloadFile)" />
+  </Target>
+  <Target
+    Name="FilterRuntimeTargets"
+    AfterTargets="ResolvePackageAssets"
+    BeforeTargets="ResolveLockFileCopyLocalFiles;GenerateBuildDependencyFile;GeneratePublishDependencyFile;ComputeFilesToPublish"
+  >
     <ItemGroup>
-      <_CleanDirectory Include="$(_CleanOutputPath)" />
-      <_CleanDirectory
-        Include="$([System.IO.Directory]::GetDirectories('$(_CleanIntermediatePath)'))"
-        Condition="Exists('$(_CleanIntermediatePath)')"
+      <RuntimeTargetsCopyLocalItems
+        Remove="@(RuntimeTargetsCopyLocalItems)"
+        Condition="'%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != '' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'win-x64' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'win-arm64' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'osx-x64' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'osx-arm64' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'linux-x64' and '%(RuntimeTargetsCopyLocalItems.RuntimeIdentifier)' != 'linux-arm64'"
       />
     </ItemGroup>
-    <RemoveDir Directories="@(_CleanDirectory)" />
+  </Target>
+
+  <!-- Clean every configuration and RID while preserving NuGet restore files and the packages feed. -->
+  <Target Name="CleanArtifactOutputs" AfterTargets="Clean" Condition="'$(UseArtifactsOutput)' == 'true'">
+    <PropertyGroup>
+      <_ArtifactsRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(ArtifactsPath)'))</_ArtifactsRoot>
+      <_ProjectIntermediateRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(BaseIntermediateOutputPath)'))</_ProjectIntermediateRoot>
+    </PropertyGroup>
+    <ItemGroup>
+      <_CleanArtifactDirectory Include="$(BaseOutputPath);$(OutputPath);$(PublishDir);$(_ArtifactsRoot)$(ArtifactsPublishOutputName)/$(ArtifactsProjectName)/" />
+      <_CleanArtifactDirectory Include="$(_ArtifactsRoot)$(ArtifactsPublishOutputName)/" Condition="'$(IsPublishable)' == 'true'" />
+      <_CleanArtifactDirectory
+        Include="$([System.IO.Directory]::GetDirectories('$(_ProjectIntermediateRoot)'))"
+        Condition="Exists('$(_ProjectIntermediateRoot)')"
+      />
+      <_CleanArtifactDirectory
+        Remove="@(_CleanArtifactDirectory)"
+        Condition="!$([System.String]::Copy('%(_CleanArtifactDirectory.FullPath)').StartsWith('$(_ArtifactsRoot)', System.StringComparison.OrdinalIgnoreCase)) or '%(_CleanArtifactDirectory.FullPath)' == '$(_ArtifactsRoot)'"
+      />
+    </ItemGroup>
+    <RemoveDir Directories="@(_CleanArtifactDirectory)" />
   </Target>
 </Project>

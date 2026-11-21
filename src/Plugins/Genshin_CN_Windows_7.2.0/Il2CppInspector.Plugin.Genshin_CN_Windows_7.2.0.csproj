@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Il2CppInspector.Plugin.Genshin</RootNamespace>
+  </PropertyGroup>
+  <Import Project="../Shared/Morax/Morax.props" />
+  <ItemGroup>
+    <ProjectReference Include="../../Common/Il2CppInspector.Common/Il2CppInspector.Common.csproj" />
+    <Compile Include="../Genshin_CN_Windows_7.1.0/GenshinPlugin.cs" Link="GenshinPlugin.cs" />
+    <Compile Include="../Genshin_CN_Windows_7.1.0/IL2CPP/GenshinDefaults.cs" Link="IL2CPP/GenshinDefaults.cs" />
+    <Compile Include="../Genshin_CN_Windows_7.1.0/Model/GenshinNativeModel.cs" Link="Model/GenshinNativeModel.cs" />
+  </ItemGroup>
+</Project>

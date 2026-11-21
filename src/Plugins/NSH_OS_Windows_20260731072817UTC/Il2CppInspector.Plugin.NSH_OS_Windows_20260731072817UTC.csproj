@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Il2CppInspector.Plugin.NSH</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Common/Il2CppInspector.Common/Il2CppInspector.Common.csproj" />
+  </ItemGroup>
+</Project>

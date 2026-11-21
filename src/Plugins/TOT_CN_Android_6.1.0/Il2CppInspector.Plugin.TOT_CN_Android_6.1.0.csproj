@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RootNamespace>Il2CppInspector.Plugin.TOT</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Common/Il2CppInspector.Common/Il2CppInspector.Common.csproj" />
+    <EmbeddedResource Include="Resources/TotWhiteboxTables.bin" LogicalName="Il2CppInspector.Plugin.TOT.TotWhiteboxTables.bin" />
+  </ItemGroup>
+</Project>
