@@ -53,6 +53,7 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub struct TextInput {
+    enabled: bool,
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -69,6 +70,7 @@ pub struct TextInput {
 impl TextInput {
     pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
         Self {
+            enabled: true,
             focus_handle: cx.focus_handle(),
             content: SharedString::default(),
             placeholder: placeholder.into(),
@@ -84,6 +86,21 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            self.is_selecting = false;
+            self.marked_range = None;
+            if self.focus_handle.is_focused(window) {
+                window.blur();
+            }
+        }
+        cx.notify();
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -313,6 +330,9 @@ impl EntityInputHandler for TextInput {
     }
 
     fn replace_text_in_range(&mut self, range_utf16: Option<Range<usize>>, new_text: &str, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -332,6 +352,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.enabled {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -481,7 +504,9 @@ impl Element for TextElement {
             scroll = cursor_x;
         }
         let left = bounds.left() - scroll;
-        let (selection, cursor) = if selected_range.is_empty() {
+        let (selection, cursor) = if !input.enabled {
+            (None, None)
+        } else if selected_range.is_empty() {
             (
                 None,
                 Some(fill(
@@ -520,7 +545,9 @@ impl Element for TextElement {
         cx: &mut App,
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        if self.input.read(cx).enabled {
+            window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
+        }
         let Some(line) = prepaint.line.take() else {
             return;
         };
@@ -546,31 +573,35 @@ impl Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let focused = self.focus_handle.is_focused(window);
+        let focused = self.enabled && self.focus_handle.is_focused(window);
         div()
             .flex()
             .items_center()
-            .key_context(CONTEXT)
-            .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::select_home))
-            .on_action(cx.listener(Self::select_end))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::copy))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .when(self.enabled, |field| {
+                field
+                    .key_context(CONTEXT)
+                    .track_focus(&self.focus_handle)
+                    .cursor(CursorStyle::IBeam)
+                    .on_action(cx.listener(Self::backspace))
+                    .on_action(cx.listener(Self::delete))
+                    .on_action(cx.listener(Self::left))
+                    .on_action(cx.listener(Self::right))
+                    .on_action(cx.listener(Self::select_left))
+                    .on_action(cx.listener(Self::select_right))
+                    .on_action(cx.listener(Self::select_all))
+                    .on_action(cx.listener(Self::home))
+                    .on_action(cx.listener(Self::end))
+                    .on_action(cx.listener(Self::select_home))
+                    .on_action(cx.listener(Self::select_end))
+                    .on_action(cx.listener(Self::paste))
+                    .on_action(cx.listener(Self::cut))
+                    .on_action(cx.listener(Self::copy))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                    .on_mouse_move(cx.listener(Self::on_mouse_move))
+            })
+            .when(!self.enabled, |field| field.opacity(0.4))
             .flex_1()
             .min_w_0()
             .h(px(ui::CONTROL_HEIGHT))

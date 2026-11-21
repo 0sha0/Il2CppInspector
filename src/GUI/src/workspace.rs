@@ -60,6 +60,7 @@ pub struct Workspace {
     details_scroll: ScrollHandle,
     _pump: Task<()>,
     _quit: Subscription,
+    _picker_changes: Subscription,
 }
 
 impl Workspace {
@@ -85,9 +86,17 @@ impl Workspace {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
         let cli = cli::locate();
+        let picker = cx.new(|cx| GamePicker::new(cli.clone(), cx));
+        let picker_changes = cx.observe_in(&picker, window, |this, _, window, cx| {
+            for field in [Field::Binary, Field::Metadata, Field::StartupMetadata] {
+                let enabled = this.input_enabled(field, cx);
+                this.input(field).update(cx, |input, cx| input.set_enabled(enabled, window, cx));
+            }
+            cx.notify();
+        });
         Self {
             focus_handle,
-            picker: cx.new(|cx| GamePicker::new(cli.clone(), cx)),
+            picker,
             cli,
             binary: cx.new(|cx| TextInput::new("GameAssembly.dll or libil2cpp.so", cx)),
             metadata: cx.new(|cx| TextInput::new("global-metadata.dat", cx)),
@@ -109,6 +118,7 @@ impl Workspace {
             details_scroll: ScrollHandle::new(),
             _pump: pump,
             _quit: quit,
+            _picker_changes: picker_changes,
         }
     }
 
@@ -151,24 +161,17 @@ impl Workspace {
     }
 
     fn request(&self, cx: &App) -> Result<Request, String> {
-        let binary = path(&self.binary, cx).ok_or("A binary file is required.")?;
-        if !binary.is_file() {
-            return Err(format!("Binary file not found: {}", binary.display()));
-        }
-        let metadata = path(&self.metadata, cx).ok_or("A metadata file is required.")?;
-        if !metadata.is_file() {
-            return Err(format!("Metadata file not found: {}", metadata.display()));
-        }
+        let game = self.picker.read(cx).game()?;
+        let inputs = self.picker.read(cx).inputs();
+        let binary = self.input_path(Field::Binary, "Binary", inputs.is_none_or(|inputs| inputs.binary), cx)?;
+        let metadata = self.input_path(Field::Metadata, "Metadata", inputs.is_some_and(|inputs| inputs.metadata), cx)?;
+        let startup_metadata = self.input_path(Field::StartupMetadata, "Startup metadata", false, cx)?;
         let output = path(&self.output, cx).ok_or("An output directory is required.")?;
-        let startup_metadata = path(&self.startup_metadata, cx);
-        if let Some(startup_metadata) = startup_metadata.as_deref().filter(|path| !path.is_file()) {
-            return Err(format!("Startup metadata file not found: {}", startup_metadata.display()));
-        }
         Ok(Request {
             binary,
             metadata,
             output,
-            game: self.picker.read(cx).game()?,
+            game,
             targets: TARGETS
                 .iter()
                 .zip(self.targets)
@@ -178,6 +181,29 @@ impl Workspace {
             startup_metadata,
             unity_version: text(&self.unity_version, cx),
             image_base: text(&self.image_base, cx),
+        })
+    }
+
+    fn input_path(&self, field: Field, label: &str, required: bool, cx: &App) -> Result<Option<PathBuf>, String> {
+        if !self.input_enabled(field, cx) {
+            return Ok(None);
+        }
+        let value = path(self.input(field), cx);
+        if required && value.is_none() {
+            return Err(format!("{label} file is required."));
+        }
+        if let Some(path) = value.as_deref().filter(|path| !path.is_file()) {
+            return Err(format!("{label} file not found: {}", path.display()));
+        }
+        Ok(value)
+    }
+
+    fn input_enabled(&self, field: Field, cx: &App) -> bool {
+        self.picker.read(cx).inputs().is_none_or(|inputs| match field {
+            Field::Binary => inputs.binary,
+            Field::Metadata => inputs.metadata,
+            Field::StartupMetadata => inputs.startup_metadata,
+            Field::Output => true,
         })
     }
 
@@ -228,6 +254,9 @@ impl Workspace {
     }
 
     fn pick(&mut self, field: Field, cx: &mut Context<Self>) {
+        if self.picking || !self.input_enabled(field, cx) {
+            return;
+        }
         let directories = field == Field::Output;
         self.picking = true;
         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -257,8 +286,12 @@ impl Workspace {
     }
 
     fn set_path(&mut self, field: Field, path: &Path, cx: &mut Context<Self>) {
+        if !self.input_enabled(field, cx) {
+            return;
+        }
         self.input(field).update(cx, |input, cx| input.set_text(path.display().to_string(), cx));
         if field == Field::Binary
+            && self.input_enabled(Field::Metadata, cx)
             && self.metadata.read(cx).text().is_empty()
             && let Some(metadata) = find_metadata(path)
         {
@@ -364,7 +397,7 @@ impl Workspace {
                 ("pick", field as usize),
                 "Select",
                 Tone::Normal,
-                !self.picking,
+                !self.picking && self.input_enabled(field, cx),
                 cx.listener(move |this, _, _, cx| this.pick(field, cx)),
             )),
         )
@@ -681,13 +714,18 @@ fn labeled(label: &'static str, control: impl IntoElement) -> Div {
 /// The request as label and value pairs for the details column and the copied log.
 fn details(job: &Job) -> Vec<(&'static str, String)> {
     let request = &job.request;
-    let mut details = vec![
-        ("Binary", request.binary.display().to_string()),
-        ("Metadata", request.metadata.display().to_string()),
+    let mut details = Vec::new();
+    if let Some(path) = &request.binary {
+        details.push(("Binary", path.display().to_string()));
+    }
+    if let Some(path) = &request.metadata {
+        details.push(("Metadata", path.display().to_string()));
+    }
+    details.extend([
         ("Output", request.output.display().to_string()),
         ("Game", request.game.clone().unwrap_or_else(|| "Auto-detect".to_owned())),
         ("Targets", job.targets()),
-    ];
+    ]);
     if let Some(path) = &request.startup_metadata {
         details.push(("Startup metadata", path.display().to_string()));
     }

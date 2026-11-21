@@ -15,7 +15,7 @@ const STAGGER: Duration = Duration::from_millis(35);
 
 enum Games {
     Loading,
-    Loaded(Vec<String>),
+    Loaded(Vec<cli::GameInfo>),
     Failed(String),
 }
 
@@ -68,6 +68,15 @@ impl GamePicker {
             depth if depth == COLUMNS.len() => Ok(Some(self.path.join("_"))),
             depth => Err(format!("Choose a {} for {}.", COLUMNS[depth].0.to_lowercase(), self.path.join(" "))),
         }
+    }
+
+    /// No declaration is selected while auto-detecting or choosing an incomplete GameId.
+    pub fn inputs(&self) -> Option<cli::InputRequirements> {
+        let Games::Loaded(games) = &self.games else {
+            return None;
+        };
+        let selected = self.game().ok().flatten()?;
+        games.iter().find(|game| game.game_id == selected).map(|game| game.inputs)
     }
 
     /// `None` is Auto-detect in the first column. Choosing an option already on the path keeps the columns after it.
@@ -239,10 +248,10 @@ fn segments(game: &str) -> Option<[&str; COLUMNS.len()]> {
 }
 
 /// Distinct segments after `prefix` among the GameIds starting with it, in list order.
-fn options<'a>(games: &'a [String], prefix: &[String]) -> Vec<&'a str> {
+fn options<'a>(games: &'a [cli::GameInfo], prefix: &[String]) -> Vec<&'a str> {
     let depth = prefix.len();
     let mut options = Vec::new();
-    for segments in games.iter().filter_map(|game| segments(game)) {
+    for segments in games.iter().filter_map(|game| segments(&game.game_id)) {
         if segments.iter().zip(prefix).all(|(segment, chosen)| *segment == chosen.as_str()) && !options.contains(&segments[depth]) {
             options.push(segments[depth]);
         }
@@ -251,7 +260,7 @@ fn options<'a>(games: &'a [String], prefix: &[String]) -> Vec<&'a str> {
 }
 
 /// Takes every following level that offers one choice, so a game with a single build opens all its columns at once.
-fn extend(games: &[String], mut path: Vec<String>) -> Vec<String> {
+fn extend(games: &[cli::GameInfo], mut path: Vec<String>) -> Vec<String> {
     while !path.is_empty() && path.len() < COLUMNS.len() {
         match options(games, &path).as_slice() {
             [only] => path.push((*only).to_owned()),
@@ -266,7 +275,7 @@ mod tests {
     // Not a glob import: gpui exports its own `test` attribute, which would shadow the built-in one.
     use super::{extend, options, segments};
 
-    fn games() -> Vec<String> {
+    fn games() -> Vec<crate::cli::GameInfo> {
         [
             "Arknights_CN_Windows_2.7.91",
             "Genshin_CN_Windows_7.1.0",
@@ -275,7 +284,14 @@ mod tests {
             "HSR_OS_Windows_4.6.0",
             "Stock",
         ]
-        .map(str::to_owned)
+        .map(|game_id| crate::cli::GameInfo {
+            game_id: game_id.to_owned(),
+            inputs: crate::cli::InputRequirements {
+                binary: true,
+                metadata: true,
+                startup_metadata: false,
+            },
+        })
         .to_vec()
     }
 

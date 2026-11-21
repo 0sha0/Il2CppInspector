@@ -19,39 +19,72 @@ pub const TARGETS: [&str; 4] = ["IDA", "Ghidra", "BinaryNinja", "Debug"];
 
 /// Shown when [`locate`] finds no CLI.
 pub const NOT_FOUND: &str =
-    "Il2CppInspector CLI not found. Build Il2CppInspector.CLI, place this program beside Il2CppInspector, or set IL2CPP_INSPECTOR_CLI.";
+    "Il2CppInspector CLI not found. Build Il2CppInspector.CLI, place this program beside Il2CppInspector.dll, or set IL2CPP_INSPECTOR_CLI.";
 
-/// Finds the CLI: `IL2CPP_INSPECTOR_CLI`, then beside this executable, then the Release or Debug build of a source
-/// checkout above it (`Il2CppInspector.GUI/target/<profile>/` next to `Il2CppInspector.CLI/bin/<configuration>/net10.0/`).
+/// Finds the CLI: `IL2CPP_INSPECTOR_CLI`, then beside this executable, then a matching build above it
+/// (`artifacts/bin/Il2CppInspector.CLI/<configuration>[_<rid>]/`).
 pub fn locate() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("IL2CPP_INSPECTOR_CLI") {
         return Some(PathBuf::from(path));
     }
     let executable = std::env::current_exe().ok()?;
     let directory = executable.parent()?;
-    let beside = directory.join(EXECUTABLE);
-    if beside.is_file() {
+    locate_in(directory)
+}
+
+fn locate_in(directory: &Path) -> Option<PathBuf> {
+    fn entry(directory: &Path) -> Option<PathBuf> {
+        ["Il2CppInspector.dll", EXECUTABLE]
+            .iter()
+            .map(|name| directory.join(name))
+            .find(|path| path.is_file())
+    }
+
+    if let Some(beside) = entry(directory) {
         return Some(beside);
     }
+    let configurations = if cfg!(debug_assertions) {
+        ["debug", "release"]
+    } else {
+        ["release", "debug"]
+    };
+    let pivot = directory.file_name()?.to_str()?;
+    let matching = configurations
+        .iter()
+        .any(|configuration| pivot == *configuration || pivot.starts_with(&format!("{configuration}_")));
     directory.ancestors().find_map(|ancestor| {
-        ["Release", "Debug"]
-            .iter()
-            .map(|configuration| {
-                ancestor
-                    .join("Il2CppInspector.CLI")
-                    .join("bin")
-                    .join(configuration)
-                    .join("net10.0")
-                    .join(EXECUTABLE)
+        matching
+            .then_some(pivot)
+            .into_iter()
+            .chain(configurations)
+            .flat_map(|configuration| {
+                [ancestor.to_path_buf(), ancestor.join("artifacts")].map(|root| root.join("bin").join("Il2CppInspector.CLI").join(configuration))
             })
-            .find(|path| path.is_file())
+            .find_map(|path| entry(&path))
     })
 }
 
-/// Runs `--list-games` and returns the installed plugin IDs.
-pub fn list_games(cli: &Path) -> Result<Vec<String>, String> {
+/// File inputs declared by a plugin; startup metadata can also be found beside metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputRequirements {
+    pub binary: bool,
+    pub metadata: bool,
+    pub startup_metadata: bool,
+}
+
+/// Installed plugin information supplied by the CLI.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameInfo {
+    pub game_id: String,
+    pub inputs: InputRequirements,
+}
+
+/// Runs `--list-games --json-progress` to read plugin IDs and their input requirements.
+pub fn list_games(cli: &Path) -> Result<Vec<GameInfo>, String> {
     let output = command(cli)
-        .arg("--list-games")
+        .args(["--list-games", "--json-progress"])
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("Cannot run {}: {error}", cli.display()))?;
@@ -62,19 +95,19 @@ pub fn list_games(cli: &Path) -> Result<Vec<String>, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
+        .map(|line| serde_json::from_str(line).map_err(|error| format!("Invalid plugin description from {}: {error}", cli.display())))
+        .collect()
 }
 
 /// One CLI invocation; optional values are omitted from the command line when `None`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Request {
-    pub binary: PathBuf,
-    pub metadata: PathBuf,
+    pub binary: Option<PathBuf>,
+    pub metadata: Option<PathBuf>,
     pub output: PathBuf,
     pub game: Option<String>,
     pub targets: Vec<&'static str>,
@@ -85,15 +118,14 @@ pub struct Request {
 
 impl Request {
     pub fn arguments(&self) -> Vec<OsString> {
-        let mut arguments: Vec<OsString> = vec![
-            "--json-progress".into(),
-            "-i".into(),
-            self.binary.clone().into(),
-            "-m".into(),
-            self.metadata.clone().into(),
-            "-o".into(),
-            self.output.clone().into(),
-        ];
+        let mut arguments: Vec<OsString> = vec!["--json-progress".into()];
+        if let Some(path) = &self.binary {
+            arguments.extend(["-i".into(), path.clone().into()]);
+        }
+        if let Some(path) = &self.metadata {
+            arguments.extend(["-m".into(), path.clone().into()]);
+        }
+        arguments.extend(["-o".into(), self.output.clone().into()]);
         for target in &self.targets {
             arguments.extend(["-t".into(), (*target).into()]);
         }
@@ -201,7 +233,13 @@ pub fn spawn<K: Copy + Send + 'static>(cli: &Path, request: &Request, key: K, se
 }
 
 fn command(cli: &Path) -> Command {
-    let mut command = Command::new(cli);
+    let mut command = if cli.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("dll")) {
+        let mut command = Command::new("dotnet");
+        command.arg(cli);
+        command
+    } else {
+        Command::new(cli)
+    };
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -223,6 +261,44 @@ fn lines(stream: impl Read) -> impl Iterator<Item = String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locates_cli_for_matching_artifact_pivot_and_beside_gui() -> Result<(), Box<dyn std::error::Error>> {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("il2cpp-inspector-cli-{}-{unique}", std::process::id()));
+        // A custom artifact root must work without a source checkout or a directory named artifacts.
+        let bin = root.join("custom-output/bin");
+        for pivot in ["debug", "release", "release_win-x64"] {
+            let directory = bin.join("Il2CppInspector.CLI").join(pivot);
+            std::fs::create_dir_all(&directory)?;
+            std::fs::write(directory.join("Il2CppInspector.dll"), [])?;
+        }
+        for pivot in ["debug", "release", "release_win-x64"] {
+            assert_eq!(
+                locate_in(&bin.join("Il2CppInspector.GUI").join(pivot)),
+                Some(bin.join("Il2CppInspector.CLI").join(pivot).join("Il2CppInspector.dll"))
+            );
+        }
+        let package = root.join("package");
+        std::fs::create_dir_all(&package)?;
+        std::fs::write(package.join(EXECUTABLE), [])?;
+        assert_eq!(locate_in(&package), Some(package.join(EXECUTABLE)));
+        std::fs::write(package.join("Il2CppInspector.dll"), [])?;
+        assert_eq!(locate_in(&package), Some(package.join("Il2CppInspector.dll")));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn launches_dll_through_dotnet_and_executable_directly() {
+        let cli = Path::new("path with spaces/Il2CppInspector.dll");
+        let dll = command(cli);
+        assert_eq!(dll.get_program(), "dotnet");
+        assert_eq!(dll.get_args().collect::<Vec<_>>(), [cli.as_os_str()]);
+        let executable = command(Path::new(EXECUTABLE));
+        assert_eq!(executable.get_program(), EXECUTABLE);
+        assert_eq!(executable.get_args().count(), 0);
+    }
 
     #[test]
     fn parses_cli_progress_objects() {
@@ -259,8 +335,8 @@ mod tests {
     #[test]
     fn omits_unset_options() {
         let request = Request {
-            binary: "GameAssembly.dll".into(),
-            metadata: "global-metadata.dat".into(),
+            binary: Some("GameAssembly.dll".into()),
+            metadata: Some("global-metadata.dat".into()),
             output: "out".into(),
             game: Some("ZZZ_CN_Windows_3.3.0".into()),
             targets: vec!["IDA", "Debug"],
